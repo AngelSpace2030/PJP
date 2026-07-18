@@ -4,8 +4,12 @@
 PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Hybrid Dictionary Mode + Quantum Transforms + Base64 + 6‑bit Text
 + Transforms 28–30 + .docx transforms 31–32
-+ Zaden Block Optimization (Option 9)
-============================================================================
++ Zaden Block Optimization (Option 9) – tries both Absolute (hybrid + all transforms)
+  and block‑optimized compression, picks the smaller result.
+  Time limit per block can be set from 1 to 300 seconds.
+  Zaden file header: single byte 0x33 (original 2‑pass) or 0x34 (variable passes).
+  Variable passes: user can specify max passes to test, the program tests
+  pass counts 0 … max and chooses the best.
 """
 
 import math
@@ -70,7 +74,7 @@ else:
     print("Quantum transforms disabled.")
 
 # ------------------------------------------------------------------
-# 2. Ask about other optional compression backends
+# 2. Ask about other optional compression backends (zstandard, paq, etc.)
 # ------------------------------------------------------------------
 other_choice = input("Install other optional compression backends (zstandard, paq, mpmath, cython, python-docx)? (y/n): ").strip().lower()
 if other_choice == 'y':
@@ -229,50 +233,19 @@ def xor_prime_hash(word: str) -> bytes:
     transformed = total ^ prime
     return transformed.to_bytes(8, 'big')
 
-# ---------- 6‑bit alphabet for transform 27 ----------
+# ---------- 6‑bit alphabet for transform 27 (exactly 64 chars) ----------
 ALPHABET_6BIT = (
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "abcdefghijklmnopqrstuvwxyz"
-    "0123456789"
-    " \n"
-)
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"    # 26
+    "abcdefghijklmnopqrstuvwxyz"    # 26
+    "0123456789"                    # 10
+    " \n"                           # 2  (space and newline)
+)  # Total = 64
 assert len(ALPHABET_6BIT) == 64
 CHAR_TO_6BIT = {ch: i for i, ch in enumerate(ALPHABET_6BIT)}
 SIXBIT_TO_CHAR = {i: ch for ch, i in CHAR_TO_6BIT.items()}
 
-# ---------- LEB128 encoding ----------
-def encode_uleb128(value: int) -> bytes:
-    if value < 0:
-        raise ValueError("LEB128 does not support negative values")
-    out = bytearray()
-    while True:
-        byte = value & 0x7F
-        value >>= 7
-        if value:
-            byte |= 0x80
-        out.append(byte)
-        if not value:
-            break
-    return bytes(out)
-
-def decode_uleb128(data: bytes, pos: int) -> Tuple[int, int]:
-    value = 0
-    shift = 0
-    while True:
-        if pos >= len(data):
-            raise ValueError("Truncated LEB128 stream")
-        byte = data[pos]
-        pos += 1
-        value |= (byte & 0x7F) << shift
-        shift += 7
-        if not (byte & 0x80):
-            break
-    return value, pos
-
 # ---------- Main Compressor Class ----------
 class PJPCompressor:
-    ZADEN_MAGIC = 0x33
-
     def __init__(self):
         download_and_merge_dictionaries()
 
@@ -288,101 +261,12 @@ class PJPCompressor:
         self.static_dict, self.word_to_index = self._load_static_dictionary()
         self.line_dict, self.line_to_index = self._load_line_dictionary()
 
+        # Precompute quantum permutations if enabled
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
 
-    # ============================================================
-    # 🛠️ PATCHED MISSING METHODS (Added to fix AttributeError)
-    # ============================================================
-    MAGIC_LINE = b'PJP_LINE_MAGIC'
-    MAGIC_DICT = b'PJP_DICT_MAGIC'
-
-    def _get_pattern(self, size: int, seed: int) -> List[int]:
-        random.seed(seed)
-        return [random.randint(0, 255) for _ in range(size)]
-
-    def _calculate_repeats(self, d: bytes) -> int:
-        if not d:
-            return 0
-        return (len(d) % 10) + 1
-
-    def _build_transform_maps(self):
-        self.fwd_transforms = {}
-        self.rev_transforms = {}
-
-        # Identity fallback for transforms that aren't defined (like 14, 33-255)
-        def identity(x):
-            return x
-
-        # Map all transforms 1 through 256
-        for t_idx in range(1, 257):
-            fwd_name = f'transform_{t_idx:02d}'
-            rev_name = f'reverse_transform_{t_idx:02d}'
-            
-            # Only assign if the methods exist, otherwise fallback to identity
-            if hasattr(self, fwd_name) and hasattr(self, rev_name):
-                self.fwd_transforms[t_idx] = getattr(self, fwd_name)
-                self.rev_transforms[t_idx] = getattr(self, rev_name)
-            else:
-                self.fwd_transforms[t_idx] = identity
-                self.rev_transforms[t_idx] = identity
-
-    def _build_pair_sequences(self) -> List[Tuple[int, int]]:
-        # 52 transforms needed for 2704 pairs (52x52)
-        bijective_transforms = list(range(52))
-        return [(t1, t2) for t1 in bijective_transforms for t2 in bijective_transforms]
-
-    def _apply_sequence(self, data: bytes, seq: Tuple[int, int]) -> bytes:
-        t1, t2 = seq
-        data = self.fwd_transforms.get(t1, lambda x: x)(data)
-        data = self.fwd_transforms.get(t2, lambda x: x)(data)
-        return data
-
-    def _reverse_sequence(self, data: bytes, seq: Tuple[int, int]) -> bytes:
-        t1, t2 = seq
-        data = self.rev_transforms.get(t2, lambda x: x)(data)
-        data = self.rev_transforms.get(t1, lambda x: x)(data)
-        return data
-
-    # Stubs for missing transforms 29-32 (and 14 handled by identity fallback)
-    def transform_29(self, data: bytes, quantum_boost: bool = False, time_limit: float = 5.0) -> bytes:
-        return data
-    def reverse_transform_29(self, data: bytes) -> bytes:
-        return data
-    def transform_30(self, data: bytes) -> bytes:
-        return data
-    def reverse_transform_30(self, data: bytes) -> bytes:
-        return data
-    def transform_31(self, data: bytes) -> bytes:
-        return data
-    def reverse_transform_31(self, data: bytes) -> bytes:
-        return data
-    def transform_32(self, data: bytes) -> bytes:
-        return data
-    def reverse_transform_32(self, data: bytes) -> bytes:
-        return data
-
-    # Stubs for missing compression helpers
-    def _compress_static_dict(self, data: bytes) -> Optional[bytes]: return None
-    def _compress_line_dict(self, data: bytes) -> Optional[bytes]: return None
-    def _compress_dynamic_dict(self, data: bytes) -> Optional[bytes]: return None
-    def _decompress_static_dict(self, data: bytes) -> Optional[bytes]: return None
-    def _decompress_line_dict(self, data: bytes) -> Optional[bytes]: return None
-    def _decompress_dynamic_dict(self, data: bytes) -> Optional[bytes]: return None
-    def _tokenize_with_static_dict(self, data: bytes) -> Optional[bytes]: return None
-    def _detokenize_static_dict(self, data: bytes) -> Optional[bytes]: return None
-    def _tokenize_with_line_dict(self, data: bytes) -> Optional[bytes]: return None
-    def _detokenize_line_dict(self, data: bytes) -> Optional[bytes]: return None
-    def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[int]]: return data, None
-    
-    def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
-                           include_28: bool = False, include_29: bool = False,
-                           include_30: bool = False) -> bytes:
-        return data  # Placeholder
-    # ============================================================
-
     # ------------------------------------------------------------------
-    # Quantum transform generation 
+    # Quantum transform generation (using Qiskit circuit as seed, no simulation)
     # ------------------------------------------------------------------
     def _generate_permutation_from_circuit(self, num_qubits: int, seed: int) -> List[int]:
         qc = QuantumCircuit(num_qubits)
@@ -409,7 +293,7 @@ class PJPCompressor:
         n = 1 << num_qubits
         perm = list(range(n))
         rng2.shuffle(perm)
-        if num_qubits == 12:
+        if num_qubits == 12:  # ultra: need 2704 permutation
             perm_2704 = list(range(2704))
             rng2 = random.Random(final_seed)
             rng2.shuffle(perm_2704)
@@ -783,7 +667,7 @@ class PJPCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01‑21
+    # Transforms 01‑21 (all bijective on bytes except 1,14 which are handled separately)
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
@@ -965,7 +849,7 @@ class PJPCompressor:
         for i in range(len(t)): t[i] ^= xor_value
         return bytes(t)
 
-    # Transform 14 is NOT bijective; skipped in pair base (Now handled by identity fallback).
+    # Transform 14 is NOT bijective; skipped in pair base.
 
     def transform_15(self, d):
         if len(d) < 1: return b''
@@ -993,7 +877,6 @@ class PJPCompressor:
     reverse_transform_16 = transform_16
 
     # transform_17 defined earlier
-
     def transform_18(self, data: bytes) -> bytes:
         if not data: return b''
         digits = self.get_basel_digits(max(10, len(data)//2 + 5))
@@ -1035,7 +918,7 @@ class PJPCompressor:
         return bytes(t)
 
     # ------------------------------------------------------------------
-    # Transform 22 – Base64 encode/decode
+    # Transform 22 – Base64 encode/decode (NOT bijective; skipped in pair base)
     # ------------------------------------------------------------------
     def transform_22(self, data: bytes) -> bytes:
         return base64.b64encode(data)
@@ -1047,7 +930,7 @@ class PJPCompressor:
             return data
 
     # ------------------------------------------------------------------
-    # Transform 23 – SHA‑256 word tokenizer 
+    # Transform 23 – SHA‑256 word tokenizer (text‑only, NOT bijective)
     # ------------------------------------------------------------------
     def transform_23(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
@@ -1130,7 +1013,7 @@ class PJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transform 24 – XOR‑prime word tokenizer 
+    # Transform 24 – XOR‑prime word tokenizer (text‑only, NOT bijective)
     # ------------------------------------------------------------------
     def transform_24(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
@@ -1213,7 +1096,7 @@ class PJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transform 25 – Dynamic Dictionary Tokenizer 
+    # Transform 25 – Dynamic Dictionary Tokenizer (text‑only, NOT bijective)
     # ------------------------------------------------------------------
     def _split_text_into_chunks(self, text: str, level: str = 'all') -> List[str]:
         if level == 'paragraph':
@@ -1328,7 +1211,7 @@ class PJPCompressor:
         return result if result is not None else b''
 
     # ------------------------------------------------------------------
-    # Transform 26 – SHA‑256 block masking
+    # Transform 26 – SHA‑256 block masking (bijective, but we exclude to be safe)
     # ------------------------------------------------------------------
     def transform_26(self, data: bytes) -> bytes:
         if not data: return b''
@@ -1350,9 +1233,10 @@ class PJPCompressor:
         return self.transform_26(data)
 
     # ------------------------------------------------------------------
-    # Transform 27 – 6‑bit text compression 
+    # Transform 27 – 6‑bit text compression (text‑only, NOT bijective)
     # ------------------------------------------------------------------
     def transform_27(self, data: bytes) -> bytes:
+        """Encode text using 6‑bit alphabet and pack into bytes."""
         try:
             text = data.decode('utf-8')
         except UnicodeDecodeError:
@@ -1448,142 +1332,1134 @@ class PJPCompressor:
             out = out[:-pad_len]
         return bytes(out)
 
-    # ------------------------------------------------------------------
-    # Fast heuristic candidate key set for Zaden
-    # ------------------------------------------------------------------
-    def _generate_candidate_keys(self, block: bytes) -> List[int]:
-        if len(block) < 3:
-            return [0]
-        pad_len = (3 - len(block) % 3) % 3
-        padded = block + b'\x00' * pad_len
-        values = [int.from_bytes(padded[i:i+3], 'little') for i in range(0, len(padded), 3)]
-        mean = sum(values) // len(values)
-        sorted_vals = sorted(values)
-        median = sorted_vals[len(sorted_vals)//2]
-
-        candidates = set()
-        for base in [mean, median]:
-            for offset in range(-2, 3):
-                candidates.add((base + offset) & 0xFFFF)
-        rng = random.Random(len(block) + int(sum(block) % 1000))
-        for _ in range(10):
-            candidates.add(rng.randint(0, 65535))
-        candidates.add(0)
-        return list(candidates)
-
-    def _find_best_16bit_key_from_candidates(self, block: bytes, candidates: List[int],
-                                              time_limit: float = 5.0) -> int:
-        if len(block) < 3:
+    def _find_best_16bit_key(self, data: bytes, quantum_boost: bool = False, time_limit: float = 60.0) -> int:
+        """
+        Zaden core: find the best 16‑bit key (0..65535) that minimizes the sum of
+        absolute deviations from the mean after subtracting the key from each 3‑byte chunk.
+        Search stops when time_limit (seconds) is exceeded; best key found so far is returned.
+        """
+        if len(data) < 3:
             return 0
-        pad_len = (3 - len(block) % 3) % 3
-        padded = block + b'\x00' * pad_len
-        values = [int.from_bytes(padded[i:i+3], 'little') for i in range(0, len(padded), 3)]
+        pad_len = (3 - len(data) % 3) % 3
+        padded = data + b'\x00' * pad_len
+        values = []
+        for i in range(0, len(padded), 3):
+            values.append(int.from_bytes(padded[i:i+3], 'little'))
 
         start_time = time.time()
         best_key = 0
         best_cost = float('inf')
 
+        if not quantum_boost or not HAS_QISKIT:
+            # Exhaustive search over 65,536 keys, but break if time limit exceeded
+            for key in range(65536):
+                # Check time every 1024 keys to reduce overhead
+                if key % 1024 == 0:
+                    if time.time() - start_time > time_limit:
+                        break
+                trans = [((v - key) & 0xFFFFFF) for v in values]
+                mean_t = sum(trans) // len(trans)
+                cost = sum(abs(t - mean_t) for t in trans)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_key = key
+                    if cost == 0:
+                        break
+            return best_key
+        else:
+            # Quantum‑boosted: use a quantum circuit to generate a seed,
+            # then shuffle the key order and test the first N keys.
+            from qiskit import QuantumCircuit
+            qc = QuantumCircuit(8)
+            for i in range(8):
+                qc.h(i)
+                qc.rz(random.random() * 2 * math.pi, i)
+            try:
+                qasm = qc.qasm()
+                seed = hash(qasm) & 0xFFFFFFFF
+            except:
+                seed = 42
+            rng = random.Random(seed)
+            keys = list(range(65536))
+            rng.shuffle(keys)
+            # Test keys until time limit is reached
+            for i, key in enumerate(keys):
+                if i % 1024 == 0:
+                    if time.time() - start_time > time_limit:
+                        break
+                trans = [((v - key) & 0xFFFFFF) for v in values]
+                mean_t = sum(trans) // len(trans)
+                cost = sum(abs(t - mean_t) for t in trans)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_key = key
+                    if cost == 0:
+                        break
+            return best_key
+
+    def transform_29(self, data: bytes, quantum_boost: bool = False, time_limit: float = 60.0) -> bytes:
+        if not data:
+            return b''
+        best_key = self._find_best_16bit_key(data, quantum_boost, time_limit)
+        pad_len = (3 - len(data) % 3) % 3
+        padded = data + b'\x00' * pad_len
+        out = bytearray([pad_len])
+        out.extend(best_key.to_bytes(2, 'little'))
+        for i in range(0, len(padded), 3):
+            chunk = padded[i:i+3]
+            val = int.from_bytes(chunk, 'little')
+            new_val = (val - best_key) % (1 << 24)
+            out.extend(new_val.to_bytes(3, 'little'))
+        return bytes(out)
+
+    def reverse_transform_29(self, data: bytes) -> bytes:
+        if not data or len(data) < 3:
+            return data
+        pad_len = data[0]
+        if len(data) < 1 + 2:
+            return data
+        key = int.from_bytes(data[1:3], 'little')
+        payload = data[3:]
+        if len(payload) % 3 != 0:
+            return data
+        out = bytearray()
+        for i in range(0, len(payload), 3):
+            chunk = payload[i:i+3]
+            val = int.from_bytes(chunk, 'little')
+            orig_val = (val + key) % (1 << 24)
+            out.extend(orig_val.to_bytes(3, 'little'))
+        if pad_len > 0:
+            out = out[:-pad_len]
+        return bytes(out)
+
+    def _find_best_24bit_key_heuristic(self, data: bytes) -> int:
+        if len(data) < 3:
+            return 0
+        pad_len = (3 - len(data) % 3) % 3
+        padded = data + b'\x00' * pad_len
+        values = []
+        for i in range(0, len(padded), 3):
+            val = int.from_bytes(padded[i:i+3], 'little')
+            values.append(val)
+        mean = sum(values) // len(values)
+        sorted_vals = sorted(values)
+        median = sorted_vals[len(sorted_vals)//2]
+        candidates = set()
+        for base in [mean, median]:
+            for offset in [0, 1, -1, 10, -10, 100, -100, 1000, -1000]:
+                cand = (base + offset) % (1 << 24)
+                candidates.add(cand)
+        rng = random.Random(42)
+        for _ in range(10):
+            candidates.add(rng.randint(0, (1 << 24) - 1))
+        best_key = 0
+        best_cost = float('inf')
         for key in candidates:
-            if time.time() - start_time > time_limit:
-                break
             trans = [((v - key) & 0xFFFFFF) for v in values]
             mean_t = sum(trans) // len(trans)
             cost = sum(abs(t - mean_t) for t in trans)
             if cost < best_cost:
                 best_cost = cost
                 best_key = key
-                if cost == 0:
-                    break
         return best_key
 
+    def transform_30(self, data: bytes) -> bytes:
+        if not data:
+            return b''
+        best_key = self._find_best_24bit_key_heuristic(data)
+        pad_len = (3 - len(data) % 3) % 3
+        padded = data + b'\x00' * pad_len
+        out = bytearray([pad_len])
+        out.extend(best_key.to_bytes(3, 'little'))
+        for i in range(0, len(padded), 3):
+            chunk = padded[i:i+3]
+            val = int.from_bytes(chunk, 'little')
+            new_val = (val - best_key) % (1 << 24)
+            out.extend(new_val.to_bytes(3, 'little'))
+        return bytes(out)
+
+    def reverse_transform_30(self, data: bytes) -> bytes:
+        if not data or len(data) < 4:
+            return data
+        pad_len = data[0]
+        if len(data) < 1 + 3:
+            return data
+        key = int.from_bytes(data[1:4], 'little')
+        payload = data[4:]
+        if len(payload) % 3 != 0:
+            return data
+        out = bytearray()
+        for i in range(0, len(payload), 3):
+            chunk = payload[i:i+3]
+            val = int.from_bytes(chunk, 'little')
+            orig_val = (val + key) % (1 << 24)
+            out.extend(orig_val.to_bytes(3, 'little'))
+        if pad_len > 0:
+            out = out[:-pad_len]
+        return bytes(out)
+
     # ------------------------------------------------------------------
-    # Multi‑pass Zaden optimization 
+    # Transform 31 – .docx paragraph extraction with dictionary compression
+    # (length‑prefixed runs for losslessness)
     # ------------------------------------------------------------------
-    def _find_best_multi_pass_keys(self, block: bytes, max_passes: int = 1000,
-                                    time_limit: float = 60.0,
-                                    stall_limit: int = 10) -> Tuple[int, List[int], bytes]:
-        if len(block) < 3:
-            return 1, [0], block
+    def _build_text_dictionary(self, text_streams: List[str], min_freq: int = 2) -> Tuple[List[str], Dict[str, int]]:
+        all_tokens = []
+        for text in text_streams:
+            words = re.findall(r'\b[\w\-]+\b', text)
+            all_tokens.extend(words)
+        freq = Counter(all_tokens)
+        common = [word for word, cnt in freq.items() if cnt >= min_freq]
+        common.sort(key=lambda w: (-freq[w], -len(w), w))
+        dictionary = common
+        word_to_idx = {w: i for i, w in enumerate(dictionary)}
+        return dictionary, word_to_idx
 
-        best_cost = len(block)
-        best_n = 0
-        best_keys = []
-        best_block = block
-
-        current = block
-        keys = []
-        stall_count = 0
-        time_per_pass = max(0.1, time_limit / 100.0)
-        start_time = time.time()
-
-        n = 0
-        while True:
-            if time.time() - start_time > time_limit:
-                break
-            if n >= max_passes:
-                break
-
-            cands = self._generate_candidate_keys(current)
-            key = self._find_best_16bit_key_from_candidates(current, cands, time_per_pass)
-            keys.append(key)
-
-            pad_len = (3 - len(current) % 3) % 3
-            padded = current + b'\x00' * pad_len
-            trans = bytearray()
-            for i in range(0, len(padded), 3):
-                v = int.from_bytes(padded[i:i+3], 'little')
-                new_v = (v - key) & 0xFFFFFF
-                trans.extend(new_v.to_bytes(3, 'little'))
-            if pad_len:
-                trans = trans[:-pad_len]
-            current = bytes(trans)
-            n += 1
-
-            overhead = len(encode_uleb128(n)) + len(keys) * 3
-            total_cost = overhead + len(current)
-
-            if total_cost < best_cost:
-                best_cost = total_cost
-                best_n = n
-                best_keys = keys.copy()
-                best_block = current
-                stall_count = 0
+    def _encode_text_with_dict(self, text: str, dictionary: List[str], word_to_idx: Dict[str, int]) -> bytes:
+        pattern = re.compile(r'(\b[\w\-]+\b)')
+        parts = pattern.split(text)
+        encoded = bytearray()
+        for i, part in enumerate(parts):
+            if i % 2 == 1:
+                if part in word_to_idx:
+                    idx = word_to_idx[part]
+                    if len(dictionary) <= 255:
+                        encoded.append(0x00)
+                        encoded.append(idx)
+                    elif len(dictionary) <= 65535:
+                        encoded.append(0x01)
+                        encoded.extend(struct.pack('>H', idx))
+                    elif len(dictionary) <= 16777215:
+                        encoded.append(0x02)
+                        encoded.extend(struct.pack('>I', idx)[1:4])
+                    else:
+                        encoded.append(0x03)
+                        encoded.extend(struct.pack('>Q', idx))
+                else:
+                    encoded.append(0x04)
+                    word_bytes = part.encode('utf-8')
+                    encoded.append(len(word_bytes))
+                    encoded.extend(word_bytes)
             else:
-                stall_count += 1
+                if part:
+                    encoded.append(0x04)
+                    raw_bytes = part.encode('utf-8')
+                    encoded.append(len(raw_bytes))
+                    encoded.extend(raw_bytes)
+        return bytes(encoded)
 
-            if len(current) == 0 or stall_count >= stall_limit:
+    def _decode_text_with_dict(self, data: bytes, dictionary: List[str]) -> str:
+        pos = 0
+        out = []
+        while pos < len(data):
+            marker = data[pos]
+            pos += 1
+            if marker == 0x00:
+                if pos >= len(data): break
+                idx = data[pos]
+                pos += 1
+                if idx < len(dictionary):
+                    out.append(dictionary[idx])
+                else:
+                    out.append(f"<ERR{idx}>")
+            elif marker == 0x01:
+                if pos + 1 >= len(data): break
+                idx = struct.unpack('>H', data[pos:pos+2])[0]
+                pos += 2
+                if idx < len(dictionary):
+                    out.append(dictionary[idx])
+                else:
+                    out.append(f"<ERR{idx}>")
+            elif marker == 0x02:
+                if pos + 2 >= len(data): break
+                idx = struct.unpack('>I', b'\x00' + data[pos:pos+3])[0]
+                pos += 3
+                if idx < len(dictionary):
+                    out.append(dictionary[idx])
+                else:
+                    out.append(f"<ERR{idx}>")
+            elif marker == 0x03:
+                if pos + 7 >= len(data): break
+                idx = struct.unpack('>Q', data[pos:pos+8])[0]
+                pos += 8
+                if idx < len(dictionary):
+                    out.append(dictionary[idx])
+                else:
+                    out.append(f"<ERR{idx}>")
+            elif marker == 0x04:
+                if pos >= len(data): break
+                length = data[pos]
+                pos += 1
+                if pos + length > len(data): break
+                raw = data[pos:pos+length]
+                pos += length
+                out.append(raw.decode('utf-8', errors='replace'))
+            else:
+                break
+        return ''.join(out)
+
+    def transform_31(self, data: bytes) -> bytes:
+        if not data or len(data) < 4 or data[:4] != b'PK\x03\x04':
+            return b'\x00' + data
+
+        try:
+            from docx import Document
+            from docx.shared import Pt
+            doc = Document(io.BytesIO(data))
+        except ImportError:
+            # Fallback: XML only, no formatting
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    with zf.open('word/document.xml') as f:
+                        xml = f.read()
+                root = ET.fromstring(xml)
+                ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+                text_parts = []
+                for t in root.findall('.//w:t', ns):
+                    if t.text:
+                        text_parts.append(t.text)
+                full_text = ''.join(text_parts)
+                if not full_text:
+                    return b'\x00' + data
+                dict_list, word_to_idx = self._build_text_dictionary([full_text])
+                encoded_text = self._encode_text_with_dict(full_text, dict_list, word_to_idx)
+                out = bytearray()
+                out.append(0x01)
+                out.append(len(dict_list))
+                for word in dict_list:
+                    wb = word.encode('utf-8')
+                    out.extend(struct.pack('>H', len(wb)))
+                    out.extend(wb)
+                out.extend(encoded_text)
+                return bytes(out)
+            except Exception:
+                return b'\x00' + data
+        else:
+            paragraphs_text = []
+            for para in doc.paragraphs:
+                para_text = ''.join(run.text for run in para.runs if run.text)
+                if para_text:
+                    paragraphs_text.append(para_text)
+            full_text = '\n'.join(paragraphs_text)
+            if not full_text:
+                return b'\x00' + data
+
+            dict_list, word_to_idx = self._build_text_dictionary([full_text])
+
+            out = bytearray()
+            out.append(0x01)
+            out.append(len(dict_list))
+            for word in dict_list:
+                wb = word.encode('utf-8')
+                out.extend(struct.pack('>H', len(wb)))
+                out.extend(wb)
+
+            for para in doc.paragraphs:
+                for run in para.runs:
+                    text = run.text
+                    if not text:
+                        continue
+                    encoded_run = self._encode_text_with_dict(text, dict_list, word_to_idx)
+                    size = run.font.size
+                    size_val = int(size.pt) if size is not None else 12
+                    style = 0
+                    if run.bold: style |= 1
+                    if run.italic: style |= 2
+                    if run.underline: style |= 4
+                    if run.font.strike: style |= 8
+                    if run.font.superscript: style |= 16
+                    if run.font.subscript: style |= 32
+                    out.append(0x05)                # run marker
+                    out.append(size_val)
+                    out.append(style)
+                    out.extend(struct.pack('>H', len(encoded_run)))  # length prefix
+                    out.extend(encoded_run)
+            return bytes(out)
+
+    def reverse_transform_31(self, data: bytes) -> bytes:
+        if not data:
+            return b''
+        if data[0] == 0x00:
+            return data[1:]
+        if data[0] != 0x01:
+            return data
+
+        try:
+            from docx import Document
+            from docx.shared import Pt
+        except ImportError:
+            return data
+
+        pos = 1
+        if pos >= len(data):
+            return data
+        num_words = data[pos]
+        pos += 1
+        dictionary = []
+        for _ in range(num_words):
+            if pos + 2 > len(data):
+                break
+            wlen = struct.unpack('>H', data[pos:pos+2])[0]
+            pos += 2
+            if pos + wlen > len(data):
+                break
+            word = data[pos:pos+wlen].decode('utf-8')
+            pos += wlen
+            dictionary.append(word)
+
+        doc = Document()
+        p = doc.add_paragraph()
+
+        while pos < len(data):
+            marker = data[pos]
+            pos += 1
+            if marker == 0x05:
+                if pos + 2 > len(data):
+                    break
+                size_val = data[pos]
+                pos += 1
+                style = data[pos]
+                pos += 1
+                if pos + 2 > len(data):
+                    break
+                run_len = struct.unpack('>H', data[pos:pos+2])[0]
+                pos += 2
+                if pos + run_len > len(data):
+                    break
+                run_data = data[pos:pos+run_len]
+                pos += run_len
+                decoded_text = self._decode_text_with_dict(run_data, dictionary)
+                run = p.add_run(decoded_text)
+                run.font.size = Pt(size_val)
+                if style & 1: run.bold = True
+                if style & 2: run.italic = True
+                if style & 4: run.underline = True
+                if style & 8: run.font.strike = True
+                if style & 16: run.font.superscript = True
+                if style & 32: run.font.subscript = True
+            else:
                 break
 
-        return best_n, best_keys, best_block
+        bio = io.BytesIO()
+        doc.save(bio)
+        return bio.getvalue()
 
     # ------------------------------------------------------------------
-    # Zaden Block Optimization
+    # Transform 32 – .docx table extraction with dictionary compression
+    # (length‑prefixed runs for losslessness)
     # ------------------------------------------------------------------
-    def _block_optimize(self, data: bytes, block_size: int = 256, quantum_boost: bool = False,
-                        time_limit: float = 60.0, max_passes: int = 2**8192) -> Tuple[bytes, List[Tuple[int, List[int]]]]:
-        block_keys = []
-        transformed_parts = []
-        total_blocks = (len(data) + block_size - 1) // block_size
-        for idx, i in enumerate(range(0, len(data), block_size)):
-            block = data[i:i+block_size]
-            print(f"Processing block {idx+1}/{total_blocks} (max passes: {max_passes}, time limit: {time_limit:.1f}s)...")
-            n_passes, keys, new_block = self._find_best_multi_pass_keys(block, max_passes, time_limit)
-            block_keys.append((n_passes, keys))
-            transformed_parts.append(new_block)
-        return b''.join(transformed_parts), block_keys
+    def transform_32(self, data: bytes) -> bytes:
+        if not data or len(data) < 4 or data[:4] != b'PK\x03\x04':
+            return b'\x00' + data
+
+        try:
+            from docx import Document
+            from docx.shared import Pt
+            doc = Document(io.BytesIO(data))
+        except ImportError:
+            return b'\x00' + data
+
+        tables = doc.tables
+        if not tables:
+            return b'\x00' + data
+
+        all_text = []
+        for table in tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    all_text.append(cell.text)
+        full_text = '\n'.join(all_text)
+        if not full_text:
+            return b'\x00' + data
+
+        dict_list, word_to_idx = self._build_text_dictionary([full_text])
+
+        out = bytearray()
+        out.append(0x02)
+        out.append(len(dict_list))
+        for word in dict_list:
+            wb = word.encode('utf-8')
+            out.extend(struct.pack('>H', len(wb)))
+            out.extend(wb)
+
+        for table in tables:
+            rows = len(table.rows)
+            cols = len(table.rows[0].cells) if rows > 0 else 0
+            out.append(rows)
+            out.append(cols)
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            if not run.text:
+                                continue
+                            encoded_run = self._encode_text_with_dict(run.text, dict_list, word_to_idx)
+                            size = run.font.size
+                            size_val = int(size.pt) if size is not None else 12
+                            style = 0
+                            if run.bold: style |= 1
+                            if run.italic: style |= 2
+                            if run.underline: style |= 4
+                            if run.font.strike: style |= 8
+                            if run.font.superscript: style |= 16
+                            if run.font.subscript: style |= 32
+                            out.append(0x06)
+                            out.append(size_val)
+                            out.append(style)
+                            out.extend(struct.pack('>H', len(encoded_run)))
+                            out.extend(encoded_run)
+                    out.append(0x00)   # end of cell
+        return bytes(out)
+
+    def reverse_transform_32(self, data: bytes) -> bytes:
+        if not data:
+            return b''
+        if data[0] == 0x00:
+            return data[1:]
+        if data[0] != 0x02:
+            return data
+
+        try:
+            from docx import Document
+            from docx.shared import Pt
+        except ImportError:
+            return data
+
+        pos = 1
+        if pos >= len(data):
+            return data
+        num_words = data[pos]
+        pos += 1
+        dictionary = []
+        for _ in range(num_words):
+            if pos + 2 > len(data):
+                break
+            wlen = struct.unpack('>H', data[pos:pos+2])[0]
+            pos += 2
+            if pos + wlen > len(data):
+                break
+            word = data[pos:pos+wlen].decode('utf-8')
+            pos += wlen
+            dictionary.append(word)
+
+        doc = Document()
+        while pos < len(data):
+            if pos >= len(data):
+                break
+            rows = data[pos]
+            pos += 1
+            if pos >= len(data):
+                break
+            cols = data[pos]
+            pos += 1
+            table = doc.add_table(rows=rows, cols=cols)
+            for r in range(rows):
+                for c in range(cols):
+                    cell = table.cell(r, c)
+                    p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
+                    while pos < len(data) and data[pos] != 0x00:
+                        marker = data[pos]
+                        pos += 1
+                        if marker == 0x06:
+                            if pos + 2 > len(data):
+                                break
+                            size_val = data[pos]
+                            pos += 1
+                            style = data[pos]
+                            pos += 1
+                            if pos + 2 > len(data):
+                                break
+                            run_len = struct.unpack('>H', data[pos:pos+2])[0]
+                            pos += 2
+                            if pos + run_len > len(data):
+                                break
+                            run_data = data[pos:pos+run_len]
+                            pos += run_len
+                            decoded_text = self._decode_text_with_dict(run_data, dictionary)
+                            run = p.add_run(decoded_text)
+                            run.font.size = Pt(size_val)
+                            if style & 1: run.bold = True
+                            if style & 2: run.italic = True
+                            if style & 4: run.underline = True
+                            if style & 8: run.font.strike = True
+                            if style & 16: run.font.superscript = True
+                            if style & 32: run.font.subscript = True
+                        else:
+                            break
+                    # skip the 0x00 that ended the cell
+                    if pos < len(data) and data[pos] == 0x00:
+                        pos += 1
+        bio = io.BytesIO()
+        doc.save(bio)
+        return bio.getvalue()
 
     # ------------------------------------------------------------------
-    # Key encoding (LEB128 num_passes + unary keys)
+    # Helpers: pattern, repeats, dynamic transform
     # ------------------------------------------------------------------
+    def _get_pattern(self, size: int, index: int):
+        random.seed(12345 + size * 100 + index)
+        return [random.randint(0, 255) for _ in range(size)]
+
+    def _calculate_repeats(self, data: bytes) -> int:
+        if not data: return 1
+        length = len(data)
+        byte_sum = sum(data) % 256
+        repeats = ((length * 13 + byte_sum * 17) % 256) + 1
+        return max(1, min(256, repeats))
+
+    def _dynamic_transform(self, n: int):
+        def tf(data: bytes):
+            if not data: return b''
+            seed = self.get_seed(n % len(self.seed_tables), len(data))
+            t = bytearray(data)
+            for i in range(len(t)): t[i] ^= seed
+            return bytes(t)
+        return tf, tf
+
+    # ------------------------------------------------------------------
+    # Build transform maps (1..256) including 31 and 32
+    # ------------------------------------------------------------------
+    def _build_transform_maps(self):
+        self.fwd_transforms: Dict[int, Callable] = {}
+        self.rev_transforms: Dict[int, Callable] = {}
+
+        # 1‑21
+        self.fwd_transforms[1] = self.transform_00; self.rev_transforms[1] = self.reverse_transform_00
+        self.fwd_transforms[2] = self.transform_01; self.rev_transforms[2] = self.reverse_transform_01
+        self.fwd_transforms[3] = self.transform_02; self.rev_transforms[3] = self.reverse_transform_02
+        self.fwd_transforms[4] = self.transform_03; self.rev_transforms[4] = self.reverse_transform_03
+        self.fwd_transforms[5] = self.transform_04; self.rev_transforms[5] = self.reverse_transform_04
+        self.fwd_transforms[6] = self.transform_05; self.rev_transforms[6] = self.reverse_transform_05
+        self.fwd_transforms[7] = self.transform_06; self.rev_transforms[7] = self.reverse_transform_06
+        self.fwd_transforms[8] = self.transform_07; self.rev_transforms[8] = self.reverse_transform_07
+        self.fwd_transforms[9] = self.transform_08; self.rev_transforms[9] = self.reverse_transform_08
+        self.fwd_transforms[10] = self.transform_09; self.rev_transforms[10] = self.reverse_transform_09
+        self.fwd_transforms[11] = self.transform_10; self.rev_transforms[11] = self.reverse_transform_10
+        self.fwd_transforms[12] = self.transform_11; self.rev_transforms[12] = self.reverse_transform_11
+        self.fwd_transforms[13] = self.transform_12; self.rev_transforms[13] = self.reverse_transform_12
+        self.fwd_transforms[14] = self.transform_13; self.rev_transforms[14] = self.reverse_transform_13
+        self.fwd_transforms[15] = self.transform_15; self.rev_transforms[15] = self.reverse_transform_15
+        self.fwd_transforms[16] = self.transform_16; self.rev_transforms[16] = self.reverse_transform_16
+        self.fwd_transforms[17] = self.transform_17; self.rev_transforms[17] = self.reverse_transform_17
+        self.fwd_transforms[18] = self.transform_18; self.rev_transforms[18] = self.reverse_transform_18
+        self.fwd_transforms[19] = self.transform_19; self.rev_transforms[19] = self.reverse_transform_19
+        self.fwd_transforms[20] = self.transform_20; self.rev_transforms[20] = self.reverse_transform_20
+        self.fwd_transforms[21] = self.transform_21; self.rev_transforms[21] = self.reverse_transform_21
+
+        # 22 – Base64
+        self.fwd_transforms[22] = self.transform_22
+        self.rev_transforms[22] = self.reverse_transform_22
+
+        # 23‑27 (text transforms)
+        self.fwd_transforms[23] = self.transform_23; self.rev_transforms[23] = self.reverse_transform_23
+        self.fwd_transforms[24] = self.transform_24; self.rev_transforms[24] = self.reverse_transform_24
+        self.fwd_transforms[25] = self.transform_25; self.rev_transforms[25] = self.reverse_transform_25
+        self.fwd_transforms[26] = self.transform_26; self.rev_transforms[26] = self.reverse_transform_26
+        self.fwd_transforms[27] = self.transform_27; self.rev_transforms[27] = self.reverse_transform_27
+
+        # 28 – deterministic per‑3‑byte subtract
+        self.fwd_transforms[28] = self.transform_28
+        self.rev_transforms[28] = self.reverse_transform_28
+
+        # 29 – global 16‑bit key subtract (Zaden core)
+        self.fwd_transforms[29] = lambda d: self.transform_29(d, quantum_boost=False, time_limit=60.0)
+        self.rev_transforms[29] = self.reverse_transform_29
+
+        # 30 – global 24‑bit key subtract (heuristic)
+        self.fwd_transforms[30] = self.transform_30
+        self.rev_transforms[30] = self.reverse_transform_30
+
+        # 31 – .docx paragraph with dictionary
+        self.fwd_transforms[31] = self.transform_31
+        self.rev_transforms[31] = self.reverse_transform_31
+
+        # 32 – .docx table with dictionary
+        self.fwd_transforms[32] = self.transform_32
+        self.rev_transforms[32] = self.reverse_transform_32
+
+        # 33‑255 dynamic
+        for i in range(33, 256):
+            fwd, rev = self._dynamic_transform(i)
+            self.fwd_transforms[i] = fwd
+            self.rev_transforms[i] = rev
+
+        # 256 no-op
+        self.fwd_transforms[256] = self.transform_256
+        self.rev_transforms[256] = self.reverse_transform_256
+
+        # Ensure all present
+        for i in range(1, 257):
+            if i not in self.fwd_transforms:
+                raise RuntimeError(f"Transform {i} missing!")
+
+    # ------------------------------------------------------------------
+    # Build pair sequences – 2704 (52×52) using only bijective transforms
+    # Exclude non‑bijective (1,14,22,23,24,25,26,27,31,32)
+    # ------------------------------------------------------------------
+    def _build_pair_sequences(self) -> List[Tuple[int, int]]:
+        safe = []
+        for i in range(1, 257):
+            if i in (1, 14, 22, 23, 24, 25, 26, 27, 31, 32):
+                continue
+            safe.append(i)
+            if len(safe) == 52:
+                break
+        while len(safe) < 52:
+            safe.append(256)
+        base = safe
+        return [(t1, t2) for t1 in base for t2 in base]
+
+    # ------------------------------------------------------------------
+    # Apply and reverse sequences
+    # ------------------------------------------------------------------
+    def _apply_sequence(self, data: bytes, seq: Tuple[int, ...]) -> bytes:
+        result = data
+        for t_num in seq:
+            result = self.fwd_transforms[t_num](result)
+        return result
+
+    def _reverse_sequence(self, data: bytes, seq: Tuple[int, ...]) -> bytes:
+        result = data
+        for t_num in reversed(seq):
+            result = self.rev_transforms[t_num](result)
+        return result
+
+    # ------------------------------------------------------------------
+    # Compression backends (dual mode)
+    # ------------------------------------------------------------------
+    def _compress_backend(self, data: bytes, safe: bool = False) -> bytes:
+        candidates = []
+        if paq is not None:
+            try:
+                if safe:
+                    candidates.append((b'P', b'P' + paq.compress(data)))
+                else:
+                    candidates.append((b'L', paq.compress(data)))
+            except:
+                pass
+        if HAS_ZSTD:
+            try:
+                if safe:
+                    candidates.append((b'Z', b'Z' + zstd_cctx.compress(data)))
+                else:
+                    candidates.append((b'Z', zstd_cctx.compress(data)))
+            except:
+                pass
+        candidates.append((b'N', b'N' + data))
+        if not candidates:
+            return b'N' + data
+        if not safe:
+            _, best = min(candidates, key=lambda x: len(x[1]))
+            return best
+        else:
+            _, best = min(candidates, key=lambda x: len(x[1]))
+            return best
+
+    def _decompress_backend(self, data: bytes, safe: bool = False) -> Optional[bytes]:
+        if len(data) == 0:
+            return None
+        if safe:
+            marker = data[0:1]
+            payload = data[1:]
+            if marker == b'N':
+                return payload
+            elif marker == b'Z' and HAS_ZSTD:
+                try:
+                    return zstd_dctx.decompress(payload)
+                except:
+                    pass
+            elif marker == b'P' and paq is not None:
+                try:
+                    return paq.decompress(payload)
+                except:
+                    pass
+            return None
+        # marker‑free
+        if HAS_ZSTD:
+            try:
+                return zstd_dctx.decompress(data)
+            except:
+                pass
+        if paq is not None:
+            try:
+                return paq.decompress(data)
+            except:
+                pass
+        if len(data) > 0 and data[0] == ord('N'):
+            return data[1:]
+        return None
+
+    # ------------------------------------------------------------------
+    # Variable‑length header encoding / decoding
+    # ------------------------------------------------------------------
+    def _encode_marker_single(self, t: int) -> bytes:
+        if t <= 252:
+            return bytes([t - 1])
+        return bytes([254, t - 253])
+
+    def _encode_marker_raw(self) -> bytes:
+        return bytes([252])
+
+    def _encode_marker_pair(self, t1: int, t2: int) -> bytes:
+        idx = (t1 - 1) * 52 + (t2 - 1)
+        return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
+
+    def _decode_header(self, data: bytes):
+        if len(data) < 1:
+            return 0, ()
+        f = data[0]
+        if f < 252:
+            return 1, (f + 1,)
+        elif f == 252:
+            return 1, ()
+        elif f == 253:
+            if len(data) < 3:
+                return 0, ()
+            idx = (data[1] << 8) | data[2]
+            if idx >= len(self.sequences):
+                return 0, ()
+            t1, t2 = self.pair_lookup[idx]
+            return 3, (t1, t2)
+        elif f == 254:
+            if len(data) < 2:
+                return 0, ()
+            x = data[1]
+            if x > 3:
+                return 0, ()
+            return 2, (253 + x,)
+        else:
+            return 0, ()
+
+    # ------------------------------------------------------------------
+    # Main compression with auto‑correction – flags for 28, 29, 30
+    # ------------------------------------------------------------------
+    def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
+                           include_28: bool = False, include_29: bool = False,
+                           include_30: bool = False) -> bytes:
+        if not data:
+            backend = self._compress_backend(b'', safe)
+            compressed = self._encode_marker_raw() + backend
+            if not safe:
+                decomp, _ = self._decompress_auto(compressed)
+                if decomp != b'':
+                    return self.compress_with_best(data, safe=True, ultra=ultra,
+                                                   include_28=include_28, include_29=include_29,
+                                                   include_30=include_30)
+            return compressed
+
+        best_total = float('inf')
+        best_bytes = None
+
+        # Build list of single transforms (1..256) – exclude 28-30 if not allowed
+        single_transforms = list(range(1, 257))
+        if not include_28:
+            single_transforms = [t for t in single_transforms if t != 28]
+        if not include_29:
+            single_transforms = [t for t in single_transforms if t != 29]
+        if not include_30:
+            single_transforms = [t for t in single_transforms if t != 30]
+
+        # Add quantum transforms if enabled
+        if USE_QUANTUM and HAS_QISKIT:
+            fast_quantum = range(257, 266)
+            single_transforms.extend(fast_quantum)
+            if ultra:
+                single_transforms.extend(range(266, 283))
+
+        # Filter pairs: exclude pairs containing disallowed transforms
+        allowed_pairs = self.sequences
+        if not include_28:
+            allowed_pairs = [seq for seq in allowed_pairs if 28 not in seq]
+        if not include_29:
+            allowed_pairs = [seq for seq in allowed_pairs if 29 not in seq]
+        if not include_30:
+            allowed_pairs = [seq for seq in allowed_pairs if 30 not in seq]
+
+        # raw
+        raw_backend = self._compress_backend(data, safe)
+        candidate = self._encode_marker_raw() + raw_backend
+        if len(candidate) < best_total:
+            best_total = len(candidate)
+            best_bytes = candidate
+
+        # singles
+        for t in single_transforms:
+            try:
+                transformed = self.fwd_transforms[t](data)
+                backend = self._compress_backend(transformed, safe)
+                candidate = self._encode_marker_single(t) + backend
+                if len(candidate) < best_total:
+                    best_total = len(candidate)
+                    best_bytes = candidate
+            except:
+                continue
+
+        # pairs – only if ultra mode is on
+        if ultra:
+            for t1, t2 in allowed_pairs:
+                try:
+                    transformed = self._apply_sequence(data, (t1, t2))
+                    backend = self._compress_backend(transformed, safe)
+                    candidate = self._encode_marker_pair(t1, t2) + backend
+                    if len(candidate) < best_total:
+                        best_total = len(candidate)
+                        best_bytes = candidate
+                except:
+                    continue
+
+        decomp, _ = self._decompress_auto(best_bytes)
+        if decomp != data:
+            if not safe:
+                print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
+                return self.compress_with_best(data, safe=True, ultra=ultra,
+                                               include_28=include_28, include_29=include_29,
+                                               include_30=include_30)
+            else:
+                raise RuntimeError("Safe compression failed – unexpected internal error!")
+        return best_bytes
+
+    def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:
+        offset, seq = self._decode_header(data)
+        if offset == 0:
+            return b'', None
+        payload = data[offset:]
+        if not payload:
+            return b'', None
+
+        first_byte = payload[0:1]
+        if first_byte in (b'N', b'Z', b'P'):
+            res = self._decompress_backend(payload, safe=True)
+        else:
+            res = self._decompress_backend(payload, safe=False)
+        if res is None:
+            return b'', None
+
+        try:
+            if not seq:
+                result = res
+            else:
+                result = self._reverse_sequence(res, seq)
+        except:
+            return b'', None
+        return result, seq
+
+    # ------------------------------------------------------------------
+    # Dictionary compression helpers (for hybrid mode)
+    # ------------------------------------------------------------------
+    MAGIC_DICT = b'DICT'
+    MAGIC_LINE = b'LINE'
+
+    def _tokenize_with_static_dict(self, data: bytes) -> Optional[bytes]:
+        try:
+            text = data.decode('utf-8')
+        except:
+            return None
+        pattern = r'([A-Za-z0-9_]+)'
+        tokens = re.split(pattern, text)
+        stream = bytearray()
+        for i, tok in enumerate(tokens):
+            if i % 2 == 1:
+                idx = self.word_to_index.get(tok)
+                if idx is not None:
+                    stream += b'\x01'
+                    stream += struct.pack('>I', idx)
+                else:
+                    word_bytes = tok.encode('utf-8')
+                    stream += b'\x02'
+                    stream += struct.pack('>H', len(word_bytes))
+                    stream += word_bytes
+            else:
+                if tok:
+                    sep_bytes = tok.encode('utf-8')
+                    stream += b'\x00'
+                    stream += struct.pack('>H', len(sep_bytes))
+                    stream += sep_bytes
+        return bytes(stream)
+
+    def _detokenize_static_dict(self, token_stream: bytes) -> Optional[bytes]:
+        if not token_stream:
+            return b''
+        out = bytearray()
+        pos = 0
+        while pos < len(token_stream):
+            if pos >= len(token_stream):
+                break
+            typ = token_stream[pos]
+            pos += 1
+            if typ == 0x01:
+                if pos + 4 > len(token_stream):
+                    break
+                idx = struct.unpack('>I', token_stream[pos:pos+4])[0]
+                pos += 4
+                if idx < len(self.static_dict):
+                    out += self.static_dict[idx].encode('utf-8')
+                else:
+                    return None
+            elif typ == 0x02:
+                if pos + 2 > len(token_stream):
+                    break
+                word_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
+                pos += 2
+                if pos + word_len > len(token_stream):
+                    break
+                out += token_stream[pos:pos+word_len]
+                pos += word_len
+            elif typ == 0x00:
+                if pos + 2 > len(token_stream):
+                    break
+                sep_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
+                pos += 2
+                if pos + sep_len > len(token_stream):
+                    break
+                out += token_stream[pos:pos+sep_len]
+                pos += sep_len
+            else:
+                break
+        return bytes(out)
+
+    def _compress_static_dict(self, data: bytes) -> Optional[bytes]:
+        token_stream = self._tokenize_with_static_dict(data)
+        if token_stream is None:
+            return None
+        compressed = self._compress_backend(token_stream, safe=True)
+        return self.MAGIC_DICT + b'\x01' + compressed
+
+    def _decompress_static_dict(self, compressed: bytes) -> Optional[bytes]:
+        if not compressed.startswith(self.MAGIC_DICT + b'\x01'):
+            return None
+        payload = compressed[len(self.MAGIC_DICT) + 1:]
+        token_stream = self._decompress_backend(payload, safe=True)
+        if token_stream is None:
+            return None
+        return self._detokenize_static_dict(token_stream)
+
+    def _compress_dynamic_dict(self, data: bytes) -> Optional[bytes]:
+        try:
+            token_stream = self.transform_25(data)
+        except:
+            return None
+        compressed = self._compress_backend(token_stream, safe=True)
+        return self.MAGIC_DICT + b'\x02' + compressed
+
+    def _decompress_dynamic_dict(self, compressed: bytes) -> Optional[bytes]:
+        if not compressed.startswith(self.MAGIC_DICT + b'\x02'):
+            return None
+        payload = compressed[len(self.MAGIC_DICT) + 1:]
+        token_stream = self._decompress_backend(payload, safe=True)
+        if token_stream is None:
+            return None
+        return self.reverse_transform_25(token_stream)
+
+    def _tokenize_with_line_dict(self, data: bytes) -> Optional[bytes]:
+        if not self.line_dict:
+            return None
+        try:
+            text = data.decode('utf-8')
+        except:
+            return None
+
+        pos = 0
+        token_list = []
+        while pos < len(text):
+            earliest_pos = len(text) + 1
+            earliest_len = 0
+            earliest_idx = -1
+            for idx, phrase in enumerate(self.line_dict):
+                p = text.find(phrase, pos)
+                if p != -1 and (p < earliest_pos or (p == earliest_pos and len(phrase) > earliest_len)):
+                    earliest_pos = p
+                    earliest_len = len(phrase)
+                    earliest_idx = idx
+            if earliest_idx != -1:
+                if earliest_pos > pos:
+                    token_list.append((False, text[pos:earliest_pos].encode('utf-8')))
+                token_list.append((True, earliest_idx))
+                pos = earliest_pos + earliest_len
+            else:
+                token_list.append((False, text[pos:].encode('utf-8')))
+                break
+
+        out = bytearray()
+        for is_index, payload in token_list:
+            if is_index:
+                out += b'\x01'
+                out += struct.pack('>Q', payload)
+            else:
+                raw_bytes = payload
+                out += b'\x00'
+                out += struct.pack('>H', len(raw_bytes))
+                out += raw_bytes
+        return bytes(out)
+
+    def _detokenize_line_dict(self, token_stream: bytes) -> Optional[bytes]:
+        if not token_stream:
+            return b''
+        out = bytearray()
+        pos = 0
+        while pos < len(token_stream):
+            if pos >= len(token_stream):
+                break
+            typ = token_stream[pos]
+            pos += 1
+            if typ == 1:
+                if pos + 8 > len(token_stream):
+                    return None
+                idx = struct.unpack('>Q', token_stream[pos:pos+8])[0]
+                pos += 8
+                if idx < len(self.line_dict):
+                    out += self.line_dict[idx].encode('utf-8')
+                else:
+                    return None
+            elif typ == 0:
+                if pos + 2 > len(token_stream):
+                    return None
+                raw_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
+                pos += 2
+                if pos + raw_len > len(token_stream):
+                    return None
+                out += token_stream[pos:pos+raw_len]
+                pos += raw_len
+            else:
+                return None
+        return bytes(out)
+
+    def _compress_line_dict(self, data: bytes) -> Optional[bytes]:
+        token_stream = self._tokenize_with_line_dict(data)
+        if token_stream is None:
+            return None
+        compressed = self._compress_backend(token_stream, safe=True)
+        return self.MAGIC_LINE + compressed
+
+    def _decompress_line_dict(self, compressed: bytes) -> Optional[bytes]:
+        if not compressed.startswith(self.MAGIC_LINE):
+            return None
+        payload = compressed[len(self.MAGIC_LINE):]
+        token_stream = self._decompress_backend(payload, safe=True)
+        if token_stream is None:
+            return None
+        return self._detokenize_line_dict(token_stream)
+
+    # ------------------------------------------------------------------
+    # Zaden Block Optimization with time‑limited search and variable‑length key coding
+    # ------------------------------------------------------------------
+    ZADEN_MAGIC = 0x33          # original 2‑pass
+    ZADEN_VAR_MAGIC = 0x34      # variable passes
+
     def _encode_key_unary(self, key: int) -> bytes:
+        """
+        Encode a 16‑bit key with unary prefix:
+        Prefix: (length-1) zeros followed by '1', where length = bit length of key.
+        Then the key bits (without leading zeros).
+        For key=0, length=1, prefix='1', bits='0'.
+        """
         if key == 0:
             bits = '0'
             length = 1
         else:
-            bits = bin(key)[2:]
+            bits = bin(key)[2:]   # binary without '0b'
             length = len(bits)
         prefix = '0' * (length - 1) + '1'
         encoded_str = prefix + bits
+        # Pad to multiple of 8 bits
         pad = (8 - len(encoded_str) % 8) % 8
         encoded_str += '0' * pad
         out = bytearray()
@@ -1592,7 +2468,14 @@ class PJPCompressor:
         return bytes(out)
 
     def _decode_key_unary(self, data: bytes, pos: int) -> Tuple[int, int]:
+        """
+        Decode a 16‑bit key from the byte stream starting at byte position `pos`.
+        Returns (key, new_pos).
+        Uses unary prefix: zeros + '1' to indicate bit length, then the key bits.
+        After reading the key, we advance to the next byte boundary (skip padding bits).
+        """
         bit_idx = pos * 8
+        # Count zeros until we hit a '1'
         zeros = 0
         while True:
             byte_idx = bit_idx // 8
@@ -1605,7 +2488,8 @@ class PJPCompressor:
             if bit == 1:
                 break
             zeros += 1
-        length = zeros + 1
+        length = zeros + 1  # number of bits for the key
+        # Now read `length` bits as the key
         key = 0
         for _ in range(length):
             byte_idx = bit_idx // 8
@@ -1616,44 +2500,150 @@ class PJPCompressor:
             bit = (byte >> (7 - bit_off)) & 1
             key = (key << 1) | bit
             bit_idx += 1
+        # Advance to the next byte boundary (skip padding bits of the current byte)
         bit_idx = ((bit_idx + 7) // 8) * 8
         new_pos = bit_idx // 8
         return key, new_pos
 
-    def _encode_block_keys(self, num_passes: int, keys: List[int]) -> bytes:
-        out = bytearray(encode_uleb128(num_passes))
-        for k in keys:
-            out.extend(self._encode_key_unary(k))
-        return bytes(out)
+    def _find_best_two_pass_keys(self, block: bytes, quantum_boost: bool = False, time_limit: float = 60.0) -> Tuple[int, int, bytes]:
+        """
+        Zaden two‑pass 16‑bit subtraction with time limit.
+        - Pass 1: find best key1 (≤ time_limit/2)
+        - Pass 2: find best key2 (≤ time_limit/2)
+        Returns (key1, key2, transformed_block).
+        """
+        if len(block) < 3:
+            return 0, 0, block
+
+        # Pass 1 – use half the time limit
+        time_per_pass = max(1.0, time_limit / 2)
+        key1 = self._find_best_16bit_key(block, quantum_boost, time_per_pass)
+        # Apply key1 (with padding)
+        pad_len1 = (3 - len(block) % 3) % 3
+        padded1 = block + b'\x00' * pad_len1
+        trans1 = bytearray()
+        for i in range(0, len(padded1), 3):
+            v = int.from_bytes(padded1[i:i+3], 'little')
+            new_v = (v - key1) & 0xFFFFFF
+            trans1.extend(new_v.to_bytes(3, 'little'))
+        if pad_len1:
+            trans1 = trans1[:-pad_len1]
+        inter = bytes(trans1)
+
+        # Pass 2 – use the remaining time
+        key2 = self._find_best_16bit_key(inter, quantum_boost, time_per_pass)
+        # Apply key2 (with padding)
+        pad_len2 = (3 - len(inter) % 3) % 3
+        padded2 = inter + b'\x00' * pad_len2
+        trans2 = bytearray()
+        for i in range(0, len(padded2), 3):
+            v = int.from_bytes(padded2[i:i+3], 'little')
+            new_v = (v - key2) & 0xFFFFFF
+            trans2.extend(new_v.to_bytes(3, 'little'))
+        if pad_len2:
+            trans2 = trans2[:-pad_len2]
+        final = bytes(trans2)
+
+        return key1, key2, final
+
+    def _find_best_multi_pass_keys(self, block: bytes, num_passes: int, quantum_boost: bool = False,
+                                   time_limit_per_block: float = 60.0) -> Tuple[List[int], bytes]:
+        """
+        Apply `num_passes` 16‑bit key‑subtract passes sequentially.
+        Returns (list_of_keys, final_transformed_block).
+        If num_passes == 0, returns ([], block).
+        """
+        if num_passes == 0:
+            return [], block
+
+        keys = []
+        current = block
+        for p in range(num_passes):
+            # Distribute time among passes, minimum 1 second
+            time_for_pass = max(1.0, time_limit_per_block / num_passes)
+            key = self._find_best_16bit_key(current, quantum_boost, time_for_pass)
+            keys.append(key)
+
+            # Apply key
+            pad_len = (3 - len(current) % 3) % 3
+            padded = current + b'\x00' * pad_len
+            trans = bytearray()
+            for i in range(0, len(padded), 3):
+                v = int.from_bytes(padded[i:i+3], 'little')
+                new_v = (v - key) & 0xFFFFFF
+                trans.extend(new_v.to_bytes(3, 'little'))
+            if pad_len:
+                trans = trans[:-pad_len]
+            current = bytes(trans)
+        return keys, current
+
+    def _block_optimize_variable(self, data: bytes, block_size: int = 256, num_passes: int = 2,
+                                 quantum_boost: bool = False, time_limit: float = 60.0) -> Tuple[bytes, List[List[int]]]:
+        """
+        Zaden block optimizer with variable number of passes per block.
+        Returns (transformed_data, list_of_key_lists_per_block).
+        """
+        keys_per_block = []
+        transformed_parts = []
+        total_blocks = (len(data) + block_size - 1) // block_size
+        for idx, i in enumerate(range(0, len(data), block_size)):
+            block = data[i:i+block_size]
+            print(f"Processing block {idx+1}/{total_blocks} (passes: {num_passes}, time limit: {time_limit:.1f}s)...")
+            ks, new_block = self._find_best_multi_pass_keys(block, num_passes, quantum_boost, time_limit)
+            keys_per_block.append(ks)
+            transformed_parts.append(new_block)
+        return b''.join(transformed_parts), keys_per_block
 
     # ------------------------------------------------------------------
-    # Internal Zaden round‑trip test
+    # Internal Zaden round‑trip tests
     # ------------------------------------------------------------------
     def _test_zaden_roundtrip(self, data: bytes) -> bool:
+        """Test Zaden compression/decompression round-trip (2-pass)."""
         try:
             block_size = 256
-            time_limit = 5.0
-            max_passes = 50
-            transformed_data, block_keys = self._block_optimize(data, block_size, quantum_boost=False,
-                                                                time_limit=time_limit, max_passes=max_passes)
+            quantum_boost = False
+            time_limit = 5.0  # quick test
+            transformed_data, keys = self._block_optimize_variable(data, block_size, 2, quantum_boost, time_limit)
             inner_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
                                                        include_28=True, include_29=True, include_30=True)
             magic = bytes([self.ZADEN_MAGIC])
-            num_blocks = len(block_keys)
+            num_blocks = len(keys)
             header = struct.pack('<II', block_size, num_blocks)
-            key_bytes = b''
-            for n_passes, keys in block_keys:
-                key_bytes += self._encode_block_keys(n_passes, keys)
+            key_bytes = b''.join(self._encode_key_unary(k1) + self._encode_key_unary(k2) for k1, k2 in keys)
             compressed = magic + header + key_bytes + inner_compressed
             decompressed = self.decompress_block_optimized(compressed)
             return decompressed == data
         except Exception:
             return False
 
+    def _test_zaden_var_roundtrip(self, data: bytes, num_passes: int) -> bool:
+        """Test variable-passes Zaden round-trip."""
+        try:
+            block_size = 256
+            quantum_boost = False
+            time_limit = 5.0
+            transformed_data, keys_per_block = self._block_optimize_variable(data, block_size, num_passes, quantum_boost, time_limit)
+            inner_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
+                                                       include_28=True, include_29=True, include_30=True)
+            magic = bytes([self.ZADEN_VAR_MAGIC])
+            num_blocks = len(keys_per_block)
+            header = struct.pack('<II', block_size, num_blocks)
+            key_bytes = bytearray()
+            for keys in keys_per_block:
+                key_bytes.append(len(keys))   # number of passes for this block
+                for k in keys:
+                    key_bytes += self._encode_key_unary(k)
+            compressed = magic + header + bytes(key_bytes) + inner_compressed
+            decompressed = self.decompress_block_optimized(compressed)
+            return decompressed == data
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
-    # Helper: compress with hybrid
+    # Helper: compress with hybrid (Option 4 style) and return bytes
     # ------------------------------------------------------------------
     def _compress_hybrid_bytes(self, data: bytes) -> Tuple[bytes, str]:
+        """Compress data using hybrid dict + Ultra + all transforms, return (best_bytes, method_name)."""
         candidates = []
         c_static = self._compress_static_dict(data)
         if c_static is not None:
@@ -1671,13 +2661,13 @@ class PJPCompressor:
         return best_bytes, best_method
 
     # ------------------------------------------------------------------
-    # Enhanced Option 9
+    # Enhanced Option 9: tries both Absolute and Zaden with multiple pass counts
     # ------------------------------------------------------------------
     def compress_with_best_plus_block(self, infile: str, outfile: str,
                                       block_size: int = 256,
                                       quantum_boost: bool = False,
                                       time_limit_per_block: float = 60.0,
-                                      max_passes: int = 2**8192):
+                                      max_passes: int = 2):
         try:
             with open(infile, 'rb') as f:
                 data = f.read()
@@ -1685,48 +2675,78 @@ class PJPCompressor:
             print(f"Error reading file: {e}")
             return
 
+        # 1. Absolute compression (Option 4 style)
         print("Running Absolute compression (hybrid + Ultra + all transforms 28-30)...")
         abs_start = time.time()
         abs_bytes, abs_method = self._compress_hybrid_bytes(data)
         abs_time = time.time() - abs_start
         abs_size = len(abs_bytes)
 
-        print(f"\nRunning Zaden block-optimized compression (block size: {block_size}, max passes: {max_passes})...")
-        block_start = time.time()
-        transformed_data, block_keys = self._block_optimize(data, block_size, quantum_boost,
-                                                            time_limit_per_block, max_passes)
-        block_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
-                                                   include_28=True, include_29=True, include_30=True)
-        magic = bytes([self.ZADEN_MAGIC])
-        num_blocks = len(block_keys)
-        header = struct.pack('<II', block_size, num_blocks)
-        key_bytes = b''
-        for n_passes, keys in block_keys:
-            key_bytes += self._encode_block_keys(n_passes, keys)
-        block_full = magic + header + key_bytes + block_compressed
-        block_time = time.time() - block_start
-        block_size_out = len(block_full)
+        best_block_size = None
+        best_block_bytes = None
+        best_pass_count = -1
+        best_method = None
 
-        if block_size_out < abs_size:
-            print(f"\nBlock-optimized wins: {abs_size} → {block_size_out} bytes (saved {abs_size - block_size_out} bytes)")
-            best_bytes = block_full
-            method = "Zaden Block-Optimized (multi‑pass)"
+        # 2. Test each pass count from 0 to max_passes
+        for passes in range(0, max_passes + 1):
+            print(f"\n=== Testing Zaden block-optimized with {passes} passes ===")
+            block_start = time.time()
+            transformed_data, keys_per_block = self._block_optimize_variable(
+                data, block_size, passes, quantum_boost, time_limit_per_block
+            )
+            # Compress the transformed data with Ultra
+            block_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
+                                                       include_28=True, include_29=True, include_30=True)
+            # Build final output according to magic
+            if passes == 2:   # keep compatibility with original 2-pass magic 0x33
+                magic = bytes([self.ZADEN_MAGIC])
+                num_blocks = len(keys_per_block)
+                header = struct.pack('<II', block_size, num_blocks)
+                key_bytes = b''.join(self._encode_key_unary(k1) + self._encode_key_unary(k2)
+                                     for ks in keys_per_block for k1, k2 in [ks])  # exactly 2 keys per block
+                block_full = magic + header + key_bytes + block_compressed
+            else:
+                magic = bytes([self.ZADEN_VAR_MAGIC])
+                num_blocks = len(keys_per_block)
+                header = struct.pack('<II', block_size, num_blocks)
+                key_bytes = bytearray()
+                for ks in keys_per_block:
+                    key_bytes.append(len(ks))   # number of passes for this block
+                    for k in ks:
+                        key_bytes += self._encode_key_unary(k)
+                block_full = magic + header + bytes(key_bytes) + block_compressed
+
+            block_time = time.time() - block_start
+            block_size_out = len(block_full)
+            print(f"  Result size: {block_size_out} bytes  (time: {block_time:.2f}s)")
+
+            if best_block_bytes is None or block_size_out < best_block_size:
+                best_block_size = block_size_out
+                best_block_bytes = block_full
+                best_pass_count = passes
+                best_method = f"Zaden {passes} passes"
+
+        # Compare with Absolute
+        if best_block_size < abs_size:
+            print(f"\nBest Zaden ({best_pass_count} passes) wins: {abs_size} → {best_block_size} bytes (saved {abs_size - best_block_size} bytes)")
+            final_bytes = best_block_bytes
+            final_method = best_method
         else:
-            print(f"\nAbsolute wins: {block_size_out} → {abs_size} bytes (saved {block_size_out - abs_size} bytes)")
-            best_bytes = abs_bytes
-            method = abs_method
+            print(f"\nAbsolute wins: {best_block_size} → {abs_size} bytes (saved {best_block_size - abs_size} bytes)")
+            final_bytes = abs_bytes
+            final_method = abs_method
 
+        # Write output
         try:
             with open(outfile, 'wb') as f:
-                f.write(best_bytes)
+                f.write(final_bytes)
         except Exception as e:
             print(f"Error writing output file: {e}")
             return
-        print(f"Final compressed size: {len(best_bytes)} bytes ({method}) → {outfile}")
-        print(f"Absolute time: {abs_time:.2f}s, Block time: {block_time:.2f}s")
+        print(f"Final compressed size: {len(final_bytes)} bytes ({final_method}) → {outfile}")
 
     # ------------------------------------------------------------------
-    # Standard file compression
+    # Standard file compression (used by options 1-4,8)
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True, hybrid: bool = False,
                       include_28: bool = False, include_29: bool = False,
@@ -1738,6 +2758,7 @@ class PJPCompressor:
             print(f"Error reading file: {e}")
             return
 
+        # If hybrid is True, we use the same logic as _compress_hybrid_bytes
         if hybrid:
             best_bytes, method = self._compress_hybrid_bytes(data)
         else:
@@ -1758,7 +2779,7 @@ class PJPCompressor:
         print(f"Compressed {len(data)} → {len(best_bytes)} bytes ({method}) → {outfile}")
 
     # ------------------------------------------------------------------
-    # Decompression
+    # Decompression (handles both standard PJP and Zaden, now also variable passes)
     # ------------------------------------------------------------------
     def decompress_file(self, infile: str, outfile: str):
         try:
@@ -1768,7 +2789,8 @@ class PJPCompressor:
             print(f"Error reading file: {e}")
             return
 
-        if len(data) > 0 and data[0] == self.ZADEN_MAGIC:
+        # Check for Zaden magic (0x33 or 0x34)
+        if len(data) > 0 and data[0] in (self.ZADEN_MAGIC, self.ZADEN_VAR_MAGIC):
             original = self.decompress_block_optimized(data)
             if original is not None:
                 with open(outfile, 'wb') as f:
@@ -1815,52 +2837,74 @@ class PJPCompressor:
         print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
 
     def decompress_block_optimized(self, data: bytes) -> Optional[bytes]:
-        if len(data) == 0 or data[0] != self.ZADEN_MAGIC:
+        if len(data) == 0:
             return None
-        pos = 1
-        if len(data) < pos + 8:
+        magic = data[0]
+        if magic == self.ZADEN_MAGIC:
+            # Original 2‑pass format
+            pos = 1
+            if len(data) < pos + 8:
+                return None
+            block_size, num_blocks = struct.unpack('<II', data[pos:pos+8])
+            pos += 8
+            # Decode two keys per block
+            keys_per_block = []
+            for _ in range(num_blocks):
+                k1, pos = self._decode_key_unary(data, pos)
+                k2, pos = self._decode_key_unary(data, pos)
+                keys_per_block.append([k1, k2])
+        elif magic == self.ZADEN_VAR_MAGIC:
+            pos = 1
+            if len(data) < pos + 8:
+                return None
+            block_size, num_blocks = struct.unpack('<II', data[pos:pos+8])
+            pos += 8
+            keys_per_block = []
+            for _ in range(num_blocks):
+                if pos >= len(data):
+                    return None
+                num_passes = data[pos]
+                pos += 1
+                keys = []
+                for _ in range(num_passes):
+                    k, pos = self._decode_key_unary(data, pos)
+                    keys.append(k)
+                keys_per_block.append(keys)
+        else:
             return None
-        block_size, num_blocks = struct.unpack('<II', data[pos:pos+8])
-        pos += 8
-
-        block_keys = []
-        for _ in range(num_blocks):
-            num_passes, pos = decode_uleb128(data, pos)
-            keys = []
-            for _ in range(num_passes):
-                k, pos = self._decode_key_unary(data, pos)
-                keys.append(k)
-            block_keys.append((num_passes, keys))
 
         inner_compressed = data[pos:]
 
+        # Decompress inner data
         inner_data, seq = self._decompress_auto(inner_compressed)
         if inner_data is None:
             return None
 
+        # Reverse Zaden optimization for each block, in reverse order of passes
         out_parts = []
         offset = 0
-        for n_passes, keys in block_keys:
+        for keys in keys_per_block:
             block = inner_data[offset:offset+block_size]
-            offset += block_size
             current = block
+            # Apply reverse passes in reverse order
             for key in reversed(keys):
                 pad_len = (3 - len(current) % 3) % 3
                 if pad_len:
                     current += b'\x00' * pad_len
-                tmp = bytearray()
+                inter = bytearray()
                 for i in range(0, len(current), 3):
                     v = int.from_bytes(current[i:i+3], 'little')
                     orig = (v + key) & 0xFFFFFF
-                    tmp.extend(orig.to_bytes(3, 'little'))
+                    inter.extend(orig.to_bytes(3, 'little'))
                 if pad_len:
-                    tmp = tmp[:-pad_len]
-                current = bytes(tmp)
+                    inter = inter[:-pad_len]
+                current = bytes(inter)
             out_parts.append(current)
+            offset += block_size
         return b''.join(out_parts)
 
     # ------------------------------------------------------------------
-    # Verify transforms
+    # Verify transforms (quick check on single byte)
     # ------------------------------------------------------------------
     def verify_transforms(self) -> bool:
         print("Verifying all 256+ transforms...")
@@ -1896,7 +2940,7 @@ class PJPCompressor:
         return ok
 
     # ------------------------------------------------------------------
-    # Full self‑test 
+    # Full self‑test (exhaustive) – now includes Zaden variable passes
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
@@ -1905,6 +2949,7 @@ class PJPCompressor:
         all_ok = True
         rng = random.Random(12345)
 
+        # 1. Single transforms on all bytes
         print("Testing all single transforms on all 256 byte values...")
         for t_num in range(1, 257):
             for b in range(256):
@@ -1929,6 +2974,7 @@ class PJPCompressor:
             print("\n[FAIL] Base transform test failed.")
             return False
 
+        # Quantum singles if enabled
         if USE_QUANTUM and HAS_QISKIT:
             print("Testing quantum transforms on all 256 byte values...")
             for t_num in range(257, 283):
@@ -1954,6 +3000,7 @@ class PJPCompressor:
                 print("\n[FAIL] Quantum transform test failed.")
                 return False
 
+        # 2. Pairs on all bytes
         print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
         for idx, seq in enumerate(self.sequences):
             for b in range(256):
@@ -1978,6 +3025,7 @@ class PJPCompressor:
             return False
         print("  PASS: all pairs OK on all bytes")
 
+        # 3. Random data full pipeline
         print("\nTesting random 1000‑byte block through full compress/decompress...")
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
 
@@ -1992,6 +3040,7 @@ class PJPCompressor:
 
         print("  PASS: random data pipeline OK in both modes")
 
+        # 4. Empty input
         print("\nTesting empty input...")
         for safe in [False, True]:
             compressed_empty = self.compress_with_best(b'', safe, include_28=True, include_29=True,
@@ -2002,6 +3051,7 @@ class PJPCompressor:
                 return False
         print("  PASS: empty input pipeline OK")
 
+        # 5. Dictionary round‑trip tests
         print("\nTesting static word dictionary tokenizer on sample text...")
         sample = b"The quick brown fox jumps over the lazy dog. 12345 not in dict."
         token = self._tokenize_with_static_dict(sample)
@@ -2042,6 +3092,7 @@ class PJPCompressor:
             return False
         print("  PASS: dynamic dictionary round‑trip OK")
 
+        # Test 6‑bit transform (27)
         print("\nTesting 6‑bit text compression (transform 27) on sample...")
         sample_text = b"Hello world! How are you?\nThis is a test."
         enc27 = self.transform_27(sample_text)
@@ -2060,6 +3111,7 @@ class PJPCompressor:
         else:
             print("  PASS: 6‑bit transform on alphabet-only text")
 
+        # Test transforms 28–30
         print("\nTesting transform 28 on random data...")
         test28 = bytes(rng.randint(0, 255) for _ in range(100))
         enc28 = self.transform_28(test28)
@@ -2090,6 +3142,7 @@ class PJPCompressor:
         else:
             print("  PASS: transform 30 round‑trip OK")
 
+        # Test transforms 31 and 32 (.docx)
         try:
             from docx import Document
             from docx.shared import Pt
@@ -2130,13 +3183,25 @@ class PJPCompressor:
         except ImportError:
             print("\n  SKIP: python-docx not installed, cannot test transforms 31 & 32.")
 
-        print("\nTesting Zaden block optimization round‑trip...")
+        # Zaden round‑trip tests (2‑pass and variable)
+        print("\nTesting Zaden block optimization round‑trip (2-pass)...")
         test_zaden_data = bytes(rng.randint(0, 255) for _ in range(512))
         if not self._test_zaden_roundtrip(test_zaden_data):
             print("  FAIL: Zaden round‑trip mismatch")
             all_ok = False
         else:
             print("  PASS: Zaden round‑trip OK")
+
+        print("\nTesting Zaden variable‑pass (0,1,3) round‑trip...")
+        for passes in [0, 1, 3]:
+            if not self._test_zaden_var_roundtrip(test_zaden_data, passes):
+                print(f"  FAIL: Zaden variable‑pass ({passes}) round‑trip mismatch")
+                all_ok = False
+                break
+            else:
+                print(f"  PASS: Zaden variable‑pass ({passes}) round‑trip OK")
+        else:
+            print("  PASS: Zaden variable‑pass all tests OK")
 
         if all_ok:
             print("\n[All tests passed – compressor is 100% lossless]")
@@ -2145,7 +3210,7 @@ class PJPCompressor:
         return all_ok
 
     # ------------------------------------------------------------------
-    # Test 2704 pairs & extraction check 
+    # Test 2704 pairs & extraction check – now includes Zaden variable
     # ------------------------------------------------------------------
     def test_2704_pairs_lossless(self) -> bool:
         print("=" * 60)
@@ -2153,6 +3218,7 @@ class PJPCompressor:
         print("=" * 60)
         all_ok = True
 
+        # 1. Quick check: each pair on all 256 byte values
         print(f"Testing all {len(self.sequences)} pairs on all 256 byte values (quick)...")
         for idx, seq in enumerate(self.sequences):
             for b in range(256):
@@ -2177,6 +3243,7 @@ class PJPCompressor:
             return False
         print("  PASS: all pairs OK on all 256 byte values")
 
+        # 2. Test each pair on a random 64‑byte block
         print("\nTesting each pair on random 64‑byte block (round‑trip)...")
         rng = random.Random(42)
         for idx, seq in enumerate(self.sequences):
@@ -2199,6 +3266,7 @@ class PJPCompressor:
             return False
         print("  PASS: all pairs preserve random 64‑byte blocks")
 
+        # 3. Extraction check: compress & decompress a sample with Ultra and Hybrid
         print("\nTesting extraction (decompression) for Ultra mode...")
         sample_text = b"This is a sample text for extraction testing. It contains words and punctuation!"
         compressed_ultra = self.compress_with_best(sample_text, safe=False, ultra=True,
@@ -2236,13 +3304,21 @@ class PJPCompressor:
                 if os.path.exists(fname):
                     os.remove(fname)
 
-        print("\nTesting Zaden extraction (decompression) for block-optimized data...")
-        zaden_sample = b"Zaden extraction test data. " * 30
+        # Zaden extraction tests
+        print("\nTesting Zaden extraction for 2‑pass and variable passes...")
+        zaden_sample = b"Zaden extraction test data. " * 30   # ~780 bytes
         if not self._test_zaden_roundtrip(zaden_sample):
-            print("  FAIL: Zaden extraction mismatch")
+            print("  FAIL: Zaden 2‑pass extraction mismatch")
             all_ok = False
         else:
-            print("  PASS: Zaden extraction OK")
+            print("  PASS: Zaden 2‑pass extraction OK")
+        for passes in [0, 1, 3]:
+            if not self._test_zaden_var_roundtrip(zaden_sample, passes):
+                print(f"  FAIL: Zaden var pass ({passes}) extraction mismatch")
+                all_ok = False
+                break
+            else:
+                print(f"  PASS: Zaden var pass ({passes}) extraction OK")
 
         if all_ok:
             print("\n[All 2704 pair tests and extraction checks passed – system is 100% lossless]")
@@ -2261,6 +3337,7 @@ class PJPCompressor:
 # Main (with persistent menu loop and strict numeric input)
 # ------------------------------------------------------------
 def get_menu_choice():
+    """Prompt until a valid integer between 0 and 9 is entered."""
     while True:
         try:
             choice = int(input("> ").strip())
@@ -2272,6 +3349,7 @@ def get_menu_choice():
             print("Invalid input. Please enter a number (0-9).")
 
 def get_positive_int(prompt: str, default: int, min_val: int = 1, max_val: int = 300):
+    """Get an integer within [min_val, max_val]."""
     while True:
         try:
             val = input(prompt).strip()
@@ -2288,6 +3366,10 @@ def get_positive_int(prompt: str, default: int, min_val: int = 1, max_val: int =
 def main():
     print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30 + .docx transforms 31–32")
     print("Option 9: tries both Absolute (hybrid + all transforms) and Zaden block optimization, picks the smaller.")
+    print("         Time limit per block can be set from 1 to 300 seconds.")
+    print("         Zaden files use a single‑byte header: 0x33 (original) or 0x34 (variable passes).")
+    print("         Now also tests a range of passes (0..max) for Zaden to find the best.")
+    print("Dictionary entries are read as plain text or Base64‑encoded UTF‑8.")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
 
@@ -2301,11 +3383,11 @@ def main():
         print("2) Ultra (no 28-30) – 256 singles + 2704 pairs")
         print("3) Hybrid (no 28-30) – dicts + Ultra")
         print("4) Absolute (with 28, 29, 30) – all transforms")
-        print("5) Full self‑test (now includes Zaden)")
+        print("5) Full self‑test (now includes Zaden variable passes)")
         print("6) Decompress (extract)")
-        print("7) Test 2704 pairs & extraction check (now includes Zaden)")
+        print("7) Test 2704 pairs & extraction check (now includes Zaden variable passes)")
         print("8) Fast 256 transforms test (compress using 256 singles)")
-        print("9) Zaden + Absolute compare (tries both, picks best)")
+        print("9) Zaden + Absolute compare (tries multiple pass counts, picks best)")
         print("0) Exit")
         print("="*50)
 
@@ -2354,11 +3436,10 @@ def main():
             bs = get_positive_int("Block size (bytes, default 256): ", 256, 1, 65536)
             qb = input("Use quantum‑boosted search? (y/n): ").strip().lower() == 'y'
             tlim = get_positive_int("Time limit per block (seconds, default 60, 1-300): ", 60, 1, 300)
-            mp = get_positive_int("Max passes per block (default 2^8192, enter a huge number): ",
-                                  2**8192, 1, 2**8192)
-            c.compress_with_best_plus_block(i, o, block_size=bs, quantum_boost=qb,
-                                            time_limit_per_block=float(tlim), max_passes=mp)
+            max_p = get_positive_int("Maximum number of Zaden passes to test (0-255, default 2): ", 2, 0, 255)
+            c.compress_with_best_plus_block(i, o, block_size=bs, quantum_boost=qb, time_limit_per_block=float(tlim), max_passes=max_p)
 
+        # After any operation (except exit), pause
         if choice != 0:
             input("\nPress Enter to return to the menu...")
 
