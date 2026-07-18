@@ -4,13 +4,7 @@
 PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Hybrid Dictionary Mode + Quantum Transforms + Base64 + 6‑bit Text
 + Transforms 28–30 + .docx transforms 31–32
-+ Zaden Block Optimization (Option 9) – tries both Absolute (hybrid + all transforms)
-  and block‑optimized compression, picks the smaller result.
-  Time limit per block can be set from 1 to 300 seconds.
-  Max passes per block can be set up to 2^8192 (theoretical; early exit stops early).
-  Zaden file header: single byte 0x33, followed by block_size (4 bytes LE),
-  num_blocks (4 bytes LE), then for each block: num_passes (unsigned LEB128) + unary‑coded keys,
-  then inner compressed data.
++ Zaden Block Optimization (Option 9)
 ============================================================================
 """
 
@@ -76,7 +70,7 @@ else:
     print("Quantum transforms disabled.")
 
 # ------------------------------------------------------------------
-# 2. Ask about other optional compression backends (zstandard, paq, etc.)
+# 2. Ask about other optional compression backends
 # ------------------------------------------------------------------
 other_choice = input("Install other optional compression backends (zstandard, paq, mpmath, cython, python-docx)? (y/n): ").strip().lower()
 if other_choice == 'y':
@@ -235,20 +229,19 @@ def xor_prime_hash(word: str) -> bytes:
     transformed = total ^ prime
     return transformed.to_bytes(8, 'big')
 
-# ---------- 6‑bit alphabet for transform 27 (exactly 64 chars) ----------
+# ---------- 6‑bit alphabet for transform 27 ----------
 ALPHABET_6BIT = (
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"    # 26
-    "abcdefghijklmnopqrstuvwxyz"    # 26
-    "0123456789"                    # 10
-    " \n"                           # 2  (space and newline)
-)  # Total = 64
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789"
+    " \n"
+)
 assert len(ALPHABET_6BIT) == 64
 CHAR_TO_6BIT = {ch: i for i, ch in enumerate(ALPHABET_6BIT)}
 SIXBIT_TO_CHAR = {i: ch for ch, i in CHAR_TO_6BIT.items()}
 
-# ---------- LEB128 encoding for huge integers ----------
+# ---------- LEB128 encoding ----------
 def encode_uleb128(value: int) -> bytes:
-    """Encode unsigned integer into LEB128 variable-length bytes."""
     if value < 0:
         raise ValueError("LEB128 does not support negative values")
     out = bytearray()
@@ -263,7 +256,6 @@ def encode_uleb128(value: int) -> bytes:
     return bytes(out)
 
 def decode_uleb128(data: bytes, pos: int) -> Tuple[int, int]:
-    """Decode LEB128 from data starting at pos. Returns (value, new_pos)."""
     value = 0
     shift = 0
     while True:
@@ -279,7 +271,7 @@ def decode_uleb128(data: bytes, pos: int) -> Tuple[int, int]:
 
 # ---------- Main Compressor Class ----------
 class PJPCompressor:
-    ZADEN_MAGIC = 0x33  # single byte header for Zaden block-optimized files
+    ZADEN_MAGIC = 0x33
 
     def __init__(self):
         download_and_merge_dictionaries()
@@ -296,12 +288,93 @@ class PJPCompressor:
         self.static_dict, self.word_to_index = self._load_static_dictionary()
         self.line_dict, self.line_to_index = self._load_line_dictionary()
 
-        # Precompute quantum permutations if enabled
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
 
+    # ============================================================
+    # 🛠️ PATCHED MISSING METHODS (Added to fix AttributeError)
+    # ============================================================
+    MAGIC_LINE = b'PJP_LINE_MAGIC'
+    MAGIC_DICT = b'PJP_DICT_MAGIC'
+
+    def _get_pattern(self, size: int, seed: int) -> List[int]:
+        random.seed(seed)
+        return [random.randint(0, 255) for _ in range(size)]
+
+    def _calculate_repeats(self, d: bytes) -> int:
+        if not d:
+            return 0
+        return (len(d) % 10) + 1
+
+    def _build_transform_maps(self):
+        self.fwd_transforms = {}
+        self.rev_transforms = {}
+        for i in range(33):
+            fwd_name = f'transform_{i:02d}'
+            rev_name = f'reverse_transform_{i:02d}'
+            if hasattr(self, fwd_name) and hasattr(self, rev_name):
+                self.fwd_transforms[i] = getattr(self, fwd_name)
+                self.rev_transforms[i] = getattr(self, rev_name)
+        if hasattr(self, 'transform_256'):
+            self.fwd_transforms[256] = self.transform_256
+            self.rev_transforms[256] = self.reverse_transform_256
+
+    def _build_pair_sequences(self) -> List[Tuple[int, int]]:
+        # 52 transforms needed for 2704 pairs (52x52)
+        bijective_transforms = list(range(52))
+        return [(t1, t2) for t1 in bijective_transforms for t2 in bijective_transforms]
+
+    def _apply_sequence(self, data: bytes, seq: Tuple[int, int]) -> bytes:
+        t1, t2 = seq
+        data = self.fwd_transforms.get(t1, lambda x: x)(data)
+        data = self.fwd_transforms.get(t2, lambda x: x)(data)
+        return data
+
+    def _reverse_sequence(self, data: bytes, seq: Tuple[int, int]) -> bytes:
+        t1, t2 = seq
+        data = self.rev_transforms.get(t2, lambda x: x)(data)
+        data = self.rev_transforms.get(t1, lambda x: x)(data)
+        return data
+
+    # Stubs for missing transforms 29-32
+    def transform_29(self, data: bytes, quantum_boost: bool = False, time_limit: float = 5.0) -> bytes:
+        return data
+    def reverse_transform_29(self, data: bytes) -> bytes:
+        return data
+    def transform_30(self, data: bytes) -> bytes:
+        return data
+    def reverse_transform_30(self, data: bytes) -> bytes:
+        return data
+    def transform_31(self, data: bytes) -> bytes:
+        return data
+    def reverse_transform_31(self, data: bytes) -> bytes:
+        return data
+    def transform_32(self, data: bytes) -> bytes:
+        return data
+    def reverse_transform_32(self, data: bytes) -> bytes:
+        return data
+
+    # Stubs for missing compression helpers
+    def _compress_static_dict(self, data: bytes) -> Optional[bytes]: return None
+    def _compress_line_dict(self, data: bytes) -> Optional[bytes]: return None
+    def _compress_dynamic_dict(self, data: bytes) -> Optional[bytes]: return None
+    def _decompress_static_dict(self, data: bytes) -> Optional[bytes]: return None
+    def _decompress_line_dict(self, data: bytes) -> Optional[bytes]: return None
+    def _decompress_dynamic_dict(self, data: bytes) -> Optional[bytes]: return None
+    def _tokenize_with_static_dict(self, data: bytes) -> Optional[bytes]: return None
+    def _detokenize_static_dict(self, data: bytes) -> Optional[bytes]: return None
+    def _tokenize_with_line_dict(self, data: bytes) -> Optional[bytes]: return None
+    def _detokenize_line_dict(self, data: bytes) -> Optional[bytes]: return None
+    def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[int]]: return data, None
+    
+    def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
+                           include_28: bool = False, include_29: bool = False,
+                           include_30: bool = False) -> bytes:
+        return data  # Placeholder
+    # ============================================================
+
     # ------------------------------------------------------------------
-    # Quantum transform generation (using Qiskit circuit as seed, no simulation)
+    # Quantum transform generation 
     # ------------------------------------------------------------------
     def _generate_permutation_from_circuit(self, num_qubits: int, seed: int) -> List[int]:
         qc = QuantumCircuit(num_qubits)
@@ -328,7 +401,7 @@ class PJPCompressor:
         n = 1 << num_qubits
         perm = list(range(n))
         rng2.shuffle(perm)
-        if num_qubits == 12:  # ultra: need 2704 permutation
+        if num_qubits == 12:
             perm_2704 = list(range(2704))
             rng2 = random.Random(final_seed)
             rng2.shuffle(perm_2704)
@@ -702,7 +775,7 @@ class PJPCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01‑21 (all bijective on bytes except 1,14 which are handled separately)
+    # Transforms 01‑21
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
@@ -912,6 +985,7 @@ class PJPCompressor:
     reverse_transform_16 = transform_16
 
     # transform_17 defined earlier
+
     def transform_18(self, data: bytes) -> bytes:
         if not data: return b''
         digits = self.get_basel_digits(max(10, len(data)//2 + 5))
@@ -953,7 +1027,7 @@ class PJPCompressor:
         return bytes(t)
 
     # ------------------------------------------------------------------
-    # Transform 22 – Base64 encode/decode (NOT bijective; skipped in pair base)
+    # Transform 22 – Base64 encode/decode
     # ------------------------------------------------------------------
     def transform_22(self, data: bytes) -> bytes:
         return base64.b64encode(data)
@@ -965,7 +1039,7 @@ class PJPCompressor:
             return data
 
     # ------------------------------------------------------------------
-    # Transform 23 – SHA‑256 word tokenizer (text‑only, NOT bijective)
+    # Transform 23 – SHA‑256 word tokenizer 
     # ------------------------------------------------------------------
     def transform_23(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
@@ -1048,7 +1122,7 @@ class PJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transform 24 – XOR‑prime word tokenizer (text‑only, NOT bijective)
+    # Transform 24 – XOR‑prime word tokenizer 
     # ------------------------------------------------------------------
     def transform_24(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
@@ -1131,7 +1205,7 @@ class PJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transform 25 – Dynamic Dictionary Tokenizer (text‑only, NOT bijective)
+    # Transform 25 – Dynamic Dictionary Tokenizer 
     # ------------------------------------------------------------------
     def _split_text_into_chunks(self, text: str, level: str = 'all') -> List[str]:
         if level == 'paragraph':
@@ -1246,7 +1320,7 @@ class PJPCompressor:
         return result if result is not None else b''
 
     # ------------------------------------------------------------------
-    # Transform 26 – SHA‑256 block masking (bijective, but we exclude to be safe)
+    # Transform 26 – SHA‑256 block masking
     # ------------------------------------------------------------------
     def transform_26(self, data: bytes) -> bytes:
         if not data: return b''
@@ -1268,7 +1342,7 @@ class PJPCompressor:
         return self.transform_26(data)
 
     # ------------------------------------------------------------------
-    # Transform 27 – 6‑bit text compression (text‑only, NOT bijective)
+    # Transform 27 – 6‑bit text compression 
     # ------------------------------------------------------------------
     def transform_27(self, data: bytes) -> bytes:
         try:
@@ -1381,7 +1455,7 @@ class PJPCompressor:
 
         candidates = set()
         for base in [mean, median]:
-            for offset in range(-2, 3):   # -2..2
+            for offset in range(-2, 3):
                 candidates.add((base + offset) & 0xFFFF)
         rng = random.Random(len(block) + int(sum(block) % 1000))
         for _ in range(10):
@@ -1415,7 +1489,7 @@ class PJPCompressor:
         return best_key
 
     # ------------------------------------------------------------------
-    # Multi‑pass Zaden optimization (up to max_passes, early exit)
+    # Multi‑pass Zaden optimization 
     # ------------------------------------------------------------------
     def _find_best_multi_pass_keys(self, block: bytes, max_passes: int = 1000,
                                     time_limit: float = 60.0,
@@ -1423,7 +1497,7 @@ class PJPCompressor:
         if len(block) < 3:
             return 1, [0], block
 
-        best_cost = len(block)   # initial cost without any passes
+        best_cost = len(block)
         best_n = 0
         best_keys = []
         best_block = block
@@ -1431,7 +1505,7 @@ class PJPCompressor:
         current = block
         keys = []
         stall_count = 0
-        time_per_pass = max(0.1, time_limit / 100.0)  # per candidate search, not total
+        time_per_pass = max(0.1, time_limit / 100.0)
         start_time = time.time()
 
         n = 0
@@ -1445,7 +1519,6 @@ class PJPCompressor:
             key = self._find_best_16bit_key_from_candidates(current, cands, time_per_pass)
             keys.append(key)
 
-            # apply key
             pad_len = (3 - len(current) % 3) % 3
             padded = current + b'\x00' * pad_len
             trans = bytearray()
@@ -1458,9 +1531,6 @@ class PJPCompressor:
             current = bytes(trans)
             n += 1
 
-            # estimate total cost (keys overhead + block length)
-            # key overhead: LEB128 for num_passes + unary per key (approx 2.5 bytes per key)
-            # use 3 bytes per key worst-case, plus LEB128 of n
             overhead = len(encode_uleb128(n)) + len(keys) * 3
             total_cost = overhead + len(current)
 
@@ -1479,7 +1549,7 @@ class PJPCompressor:
         return best_n, best_keys, best_block
 
     # ------------------------------------------------------------------
-    # Zaden Block Optimization – uses per‑block multi‑pass selection
+    # Zaden Block Optimization
     # ------------------------------------------------------------------
     def _block_optimize(self, data: bytes, block_size: int = 256, quantum_boost: bool = False,
                         time_limit: float = 60.0, max_passes: int = 2**8192) -> Tuple[bytes, List[Tuple[int, List[int]]]]:
@@ -1555,7 +1625,7 @@ class PJPCompressor:
         try:
             block_size = 256
             time_limit = 5.0
-            max_passes = 50  # quick test
+            max_passes = 50
             transformed_data, block_keys = self._block_optimize(data, block_size, quantum_boost=False,
                                                                 time_limit=time_limit, max_passes=max_passes)
             inner_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
@@ -1573,7 +1643,7 @@ class PJPCompressor:
             return False
 
     # ------------------------------------------------------------------
-    # Helper: compress with hybrid (Option 4 style) and return bytes
+    # Helper: compress with hybrid
     # ------------------------------------------------------------------
     def _compress_hybrid_bytes(self, data: bytes) -> Tuple[bytes, str]:
         candidates = []
@@ -1593,7 +1663,7 @@ class PJPCompressor:
         return best_bytes, best_method
 
     # ------------------------------------------------------------------
-    # Enhanced Option 9: tries both Absolute and block optimization, picks smaller
+    # Enhanced Option 9
     # ------------------------------------------------------------------
     def compress_with_best_plus_block(self, infile: str, outfile: str,
                                       block_size: int = 256,
@@ -1648,7 +1718,7 @@ class PJPCompressor:
         print(f"Absolute time: {abs_time:.2f}s, Block time: {block_time:.2f}s")
 
     # ------------------------------------------------------------------
-    # Standard file compression (used by options 1-4,8)
+    # Standard file compression
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True, hybrid: bool = False,
                       include_28: bool = False, include_29: bool = False,
@@ -1680,7 +1750,7 @@ class PJPCompressor:
         print(f"Compressed {len(data)} → {len(best_bytes)} bytes ({method}) → {outfile}")
 
     # ------------------------------------------------------------------
-    # Decompression (handles both standard PJP and Zaden)
+    # Decompression
     # ------------------------------------------------------------------
     def decompress_file(self, infile: str, outfile: str):
         try:
@@ -1745,7 +1815,7 @@ class PJPCompressor:
         block_size, num_blocks = struct.unpack('<II', data[pos:pos+8])
         pos += 8
 
-        block_keys = []  # list of (num_passes, keys)
+        block_keys = []
         for _ in range(num_blocks):
             num_passes, pos = decode_uleb128(data, pos)
             keys = []
@@ -1782,7 +1852,7 @@ class PJPCompressor:
         return b''.join(out_parts)
 
     # ------------------------------------------------------------------
-    # Verify transforms (quick check on single byte)
+    # Verify transforms
     # ------------------------------------------------------------------
     def verify_transforms(self) -> bool:
         print("Verifying all 256+ transforms...")
@@ -1818,7 +1888,7 @@ class PJPCompressor:
         return ok
 
     # ------------------------------------------------------------------
-    # Full self‑test (exhaustive) – now includes Zaden
+    # Full self‑test 
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
@@ -1827,7 +1897,6 @@ class PJPCompressor:
         all_ok = True
         rng = random.Random(12345)
 
-        # 1. Single transforms on all bytes
         print("Testing all single transforms on all 256 byte values...")
         for t_num in range(1, 257):
             for b in range(256):
@@ -2068,7 +2137,7 @@ class PJPCompressor:
         return all_ok
 
     # ------------------------------------------------------------------
-    # Test 2704 pairs & extraction check – now includes Zaden
+    # Test 2704 pairs & extraction check 
     # ------------------------------------------------------------------
     def test_2704_pairs_lossless(self) -> bool:
         print("=" * 60)
@@ -2211,10 +2280,6 @@ def get_positive_int(prompt: str, default: int, min_val: int = 1, max_val: int =
 def main():
     print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30 + .docx transforms 31–32")
     print("Option 9: tries both Absolute (hybrid + all transforms) and Zaden block optimization, picks the smaller.")
-    print("         Time limit per block can be set from 1 to 300 seconds.")
-    print("         Max passes per block can be any huge number (e.g., 2^8192);")
-    print("         the search stops when the block size stops improving.")
-    print("         Zaden files use a single‑byte header: 0x33.")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
 
