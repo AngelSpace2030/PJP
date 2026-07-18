@@ -309,15 +309,23 @@ class PJPCompressor:
     def _build_transform_maps(self):
         self.fwd_transforms = {}
         self.rev_transforms = {}
-        for i in range(33):
-            fwd_name = f'transform_{i:02d}'
-            rev_name = f'reverse_transform_{i:02d}'
+
+        # Identity fallback for transforms that aren't defined (like 14, 33-255)
+        def identity(x):
+            return x
+
+        # Map all transforms 1 through 256
+        for t_idx in range(1, 257):
+            fwd_name = f'transform_{t_idx:02d}'
+            rev_name = f'reverse_transform_{t_idx:02d}'
+            
+            # Only assign if the methods exist, otherwise fallback to identity
             if hasattr(self, fwd_name) and hasattr(self, rev_name):
-                self.fwd_transforms[i] = getattr(self, fwd_name)
-                self.rev_transforms[i] = getattr(self, rev_name)
-        if hasattr(self, 'transform_256'):
-            self.fwd_transforms[256] = self.transform_256
-            self.rev_transforms[256] = self.reverse_transform_256
+                self.fwd_transforms[t_idx] = getattr(self, fwd_name)
+                self.rev_transforms[t_idx] = getattr(self, rev_name)
+            else:
+                self.fwd_transforms[t_idx] = identity
+                self.rev_transforms[t_idx] = identity
 
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
         # 52 transforms needed for 2704 pairs (52x52)
@@ -336,7 +344,7 @@ class PJPCompressor:
         data = self.rev_transforms.get(t1, lambda x: x)(data)
         return data
 
-    # Stubs for missing transforms 29-32
+    # Stubs for missing transforms 29-32 (and 14 handled by identity fallback)
     def transform_29(self, data: bytes, quantum_boost: bool = False, time_limit: float = 5.0) -> bytes:
         return data
     def reverse_transform_29(self, data: bytes) -> bytes:
@@ -957,7 +965,7 @@ class PJPCompressor:
         for i in range(len(t)): t[i] ^= xor_value
         return bytes(t)
 
-    # Transform 14 is NOT bijective; skipped in pair base.
+    # Transform 14 is NOT bijective; skipped in pair base (Now handled by identity fallback).
 
     def transform_15(self, d):
         if len(d) < 1: return b''
