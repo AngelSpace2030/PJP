@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
-+ Hybrid Dictionary Mode + Quantum Transforms + Base64 + 6‑bit Text
-+ Transforms 28–30 + .docx transforms 31–32
-+ Zaden Block Optimization (Option 9) – tries both Absolute (hybrid + all transforms)
-  and block‑optimized compression, picks the smaller result.
-  Time limit per block can be set from 1 to 300 seconds.
-  Zaden file header: single byte 0x33, followed by block_size (4 bytes LE),
-  num_blocks (4 bytes LE), then unary‑coded keys, then inner compressed data.
-+ Dynamic dictionary now automatically tries multiple index sizes (1-8) and
-  BPE/RLE combinations (including 2 rounds of BPE) and picks the best.
-============================================================================
-"""
 
 import math
 import random
@@ -1258,7 +1245,6 @@ class PJPCompressor:
         if max_index >= 2**48: min_index_size = 7
         if max_index >= 2**56: min_index_size = 8
 
-        # Function to encode token stream with given index size
         def encode_stream(index_size):
             stream = bytearray()
             for chunk in chunks:
@@ -1284,57 +1270,51 @@ class PJPCompressor:
         best_bytes = None
         best_config = None
 
-        # Try all index sizes
+        def try_config(index_size, num_entries, sorted_chunks, compressed_stream, tables, rle_flag):
+            nonlocal best_bytes, best_config
+            header = bytearray()
+            header.append(index_size)
+            header += struct.pack('>I', num_entries)
+            for chunk in sorted_chunks:
+                chunk_bytes = chunk.encode('utf-8')
+                header += struct.pack('>I', len(chunk_bytes))
+                header += chunk_bytes
+            bpe_rounds = len(tables)
+            header.append(bpe_rounds)
+            for tbl in tables:
+                header.append(len(tbl))
+                for bg, code in tbl:
+                    header.extend(bg)
+                    header.append(code)
+            header.append(rle_flag)
+            full = bytes(header) + compressed_stream
+            if best_bytes is None or len(full) < len(best_bytes):
+                best_bytes = full
+                best_config = (index_size, tables, rle_flag)
+
         for index_size in range(min_index_size, 9):
             raw = encode_stream(index_size)
+            try_config(index_size, num_entries, sorted_chunks, raw, [], 0)
 
-            # Mode 0: raw
-            self._try_config(index_size, num_entries, sorted_chunks, raw, [], 0)
-
-            # Mode 1: BPE 1 round
             bpe1, t1 = self._bpe_learn_and_apply(raw)
             if t1:
-                self._try_config(index_size, num_entries, sorted_chunks, bpe1, [t1], 0)
-                # BPE1 + RLE
+                try_config(index_size, num_entries, sorted_chunks, bpe1, [t1], 0)
                 rle1 = self._rle_compress_bytes(bpe1)
                 if len(rle1) < len(bpe1):
-                    self._try_config(index_size, num_entries, sorted_chunks, rle1, [t1], 1)
+                    try_config(index_size, num_entries, sorted_chunks, rle1, [t1], 1)
                 else:
-                    self._try_config(index_size, num_entries, sorted_chunks, bpe1, [t1], 0)
+                    try_config(index_size, num_entries, sorted_chunks, bpe1, [t1], 0)
 
-                # BPE 2 rounds (use bpe1 as input)
                 bpe2, t2 = self._bpe_learn_and_apply(bpe1)
                 if t2:
-                    self._try_config(index_size, num_entries, sorted_chunks, bpe2, [t1, t2], 0)
+                    try_config(index_size, num_entries, sorted_chunks, bpe2, [t1, t2], 0)
                     rle2 = self._rle_compress_bytes(bpe2)
                     if len(rle2) < len(bpe2):
-                        self._try_config(index_size, num_entries, sorted_chunks, rle2, [t1, t2], 1)
+                        try_config(index_size, num_entries, sorted_chunks, rle2, [t1, t2], 1)
                     else:
-                        self._try_config(index_size, num_entries, sorted_chunks, bpe2, [t1, t2], 0)
+                        try_config(index_size, num_entries, sorted_chunks, bpe2, [t1, t2], 0)
 
         return best_bytes
-
-    def _try_config(self, index_size, num_entries, sorted_chunks, compressed_stream, tables, rle_flag):
-        nonlocal best_bytes, best_config
-        header = bytearray()
-        header.append(index_size)
-        header += struct.pack('>I', num_entries)
-        for chunk in sorted_chunks:
-            chunk_bytes = chunk.encode('utf-8')
-            header += struct.pack('>I', len(chunk_bytes))
-            header += chunk_bytes
-        bpe_rounds = len(tables)
-        header.append(bpe_rounds)
-        for tbl in tables:
-            header.append(len(tbl))
-            for bg, code in tbl:
-                header.extend(bg)
-                header.append(code)
-        header.append(rle_flag)
-        full = bytes(header) + compressed_stream
-        if best_bytes is None or len(full) < len(best_bytes):
-            best_bytes = full
-            best_config = (index_size, tables, rle_flag)
 
     def _dynamic_dict_detokenize(self, data: bytes) -> Optional[bytes]:
         if not data:
@@ -1394,15 +1374,12 @@ class PJPCompressor:
 
         compressed = data[pos:]
 
-        # Reverse RLE if applied
         if rle_flag:
             compressed = self._rle_decompress_bytes(compressed)
 
-        # Reverse BPE rounds in reverse order
         for tbl in reversed(tables):
             compressed = self._bpe_decompress(compressed, tbl)
 
-        # Now read indices
         token_stream = compressed
         tokens = []
         pos2 = 0
