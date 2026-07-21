@@ -2079,83 +2079,59 @@ class PJPCompressor:
         return result
 
     # ------------------------------------------------------------------
-    # Compression backends (dual mode + AI)
+    # Compression backends (always with marker)
     # ------------------------------------------------------------------
-    def _compress_backend(self, data: bytes, safe: bool = False) -> bytes:
+    def _compress_backend(self, data: bytes) -> bytes:
+        """Always return bytes starting with a marker (N, Z, P, A)."""
         candidates = []
         if paq is not None:
             try:
-                if safe:
-                    candidates.append((b'P', b'P' + paq.compress(data)))
-                else:
-                    candidates.append((b'L', paq.compress(data)))
+                candidates.append((b'P', b'P' + paq.compress(data)))
             except:
                 pass
         if HAS_ZSTD:
             try:
-                if safe:
-                    candidates.append((b'Z', b'Z' + zstd_cctx.compress(data)))
-                else:
-                    candidates.append((b'Z', zstd_cctx.compress(data)))
+                candidates.append((b'Z', b'Z' + zstd_cctx.compress(data)))
             except:
                 pass
         if HAS_AI and len(data) > 0:
             try:
                 tokenized = self.transform_33(data)
                 if tokenized != b'\x00' + data:
-                    compressed = self._compress_backend(tokenized, safe)
+                    compressed = self._compress_backend(tokenized)   # recursive, always marked
                     candidates.append((b'A', b'A' + compressed))
             except:
                 pass
+        # raw fallback (always with marker)
         candidates.append((b'N', b'N' + data))
-        if not candidates:
-            return b'N' + data
-        if not safe:
-            _, best = min(candidates, key=lambda x: len(x[1]))
-            return best
-        else:
-            _, best = min(candidates, key=lambda x: len(x[1]))
-            return best
+        _, best = min(candidates, key=lambda x: len(x[1]))
+        return best
 
-    def _decompress_backend(self, data: bytes, safe: bool = False) -> Optional[bytes]:
+    def _decompress_backend(self, data: bytes) -> Optional[bytes]:
+        """Decompress data that starts with a marker."""
         if len(data) == 0:
             return None
-        if safe:
-            marker = data[0:1]
-            payload = data[1:]
-            if marker == b'N':
-                return payload
-            elif marker == b'Z' and HAS_ZSTD:
-                try:
-                    return zstd_dctx.decompress(payload)
-                except:
-                    pass
-            elif marker == b'P' and paq is not None:
-                try:
-                    return paq.decompress(payload)
-                except:
-                    pass
-            elif marker == b'A' and HAS_AI:
-                try:
-                    inner = self._decompress_backend(payload, safe=True)
-                    if inner is not None:
-                        return self.reverse_transform_33(inner)
-                except:
-                    pass
-            return None
-        # marker‑free
-        if HAS_ZSTD:
+        marker = data[0:1]
+        payload = data[1:]
+        if marker == b'N':
+            return payload
+        elif marker == b'Z' and HAS_ZSTD:
             try:
-                return zstd_dctx.decompress(data)
+                return zstd_dctx.decompress(payload)
             except:
-                pass
-        if paq is not None:
+                return None
+        elif marker == b'P' and paq is not None:
             try:
-                return paq.decompress(data)
+                return paq.decompress(payload)
             except:
-                pass
-        if len(data) > 0 and data[0] == ord('N'):
-            return data[1:]
+                return None
+        elif marker == b'A' and HAS_AI:
+            try:
+                inner = self._decompress_backend(payload)
+                if inner is not None:
+                    return self.reverse_transform_33(inner)
+            except:
+                return None
         return None
 
     # ------------------------------------------------------------------
@@ -2202,19 +2178,13 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     # Main compression with auto‑correction – flags for 28, 29, 30
     # ------------------------------------------------------------------
-    def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
+    def compress_with_best(self, data: bytes, ultra: bool = True,
                            include_28: bool = False, include_29: bool = False,
                            include_30: bool = False) -> bytes:
         if not data:
-            backend = self._compress_backend(b'', safe)
+            backend = self._compress_backend(b'')
             compressed = self._encode_marker_raw() + backend
-            if not safe:
-                decomp, _ = self._decompress_auto(compressed)
-                if decomp != b'':
-                    return self.compress_with_best(data, safe=True, ultra=ultra,
-                                                   include_28=include_28, include_29=include_29,
-                                                   include_30=include_30)
-            return compressed
+            return compressed   # no need to verify because backend is always safe
 
         best_total = float('inf')
         best_bytes = None
@@ -2241,7 +2211,7 @@ class PJPCompressor:
         if not include_30:
             allowed_pairs = [seq for seq in allowed_pairs if 30 not in seq]
 
-        raw_backend = self._compress_backend(data, safe)
+        raw_backend = self._compress_backend(data)
         candidate = self._encode_marker_raw() + raw_backend
         if len(candidate) < best_total:
             best_total = len(candidate)
@@ -2250,7 +2220,7 @@ class PJPCompressor:
         for t in single_transforms:
             try:
                 transformed = self.fwd_transforms[t](data)
-                backend = self._compress_backend(transformed, safe)
+                backend = self._compress_backend(transformed)
                 candidate = self._encode_marker_single(t) + backend
                 if len(candidate) < best_total:
                     best_total = len(candidate)
@@ -2262,7 +2232,7 @@ class PJPCompressor:
             for t1, t2 in allowed_pairs:
                 try:
                     transformed = self._apply_sequence(data, (t1, t2))
-                    backend = self._compress_backend(transformed, safe)
+                    backend = self._compress_backend(transformed)
                     candidate = self._encode_marker_pair(t1, t2) + backend
                     if len(candidate) < best_total:
                         best_total = len(candidate)
@@ -2270,18 +2240,12 @@ class PJPCompressor:
                 except:
                     continue
 
-        # Verify decompression – if it fails, fall back to raw data
+        # Verify decompression – should always succeed now
         decomp, _ = self._decompress_auto(best_bytes)
         if decomp != data:
-            if not safe:
-                print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
-                return self.compress_with_best(data, safe=True, ultra=ultra,
-                                               include_28=include_28, include_29=include_29,
-                                               include_30=include_30)
-            else:
-                # Safe mode still failed – output raw data with 'N' marker
-                print(f"Warning: safe compression failed, storing raw data (input len={len(data)})")
-                return b'N' + data  # raw storage
+            # Fallback: store raw with marker (should never happen, but keep for safety)
+            print(f"Warning: compression failed, storing raw data (input len={len(data)})")
+            return b'N' + data
         return best_bytes
 
     def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:
@@ -2291,15 +2255,9 @@ class PJPCompressor:
         payload = data[offset:]
         if not payload:
             return b'', None
-
-        first_byte = payload[0:1]
-        if first_byte in (b'N', b'Z', b'P', b'A'):
-            res = self._decompress_backend(payload, safe=True)
-        else:
-            res = self._decompress_backend(payload, safe=False)
+        res = self._decompress_backend(payload)   # always expects marker
         if res is None:
             return b'', None
-
         try:
             if not seq:
                 result = res
@@ -2387,14 +2345,14 @@ class PJPCompressor:
         token_stream = self._tokenize_with_static_dict(data)
         if token_stream is None:
             return None
-        compressed = self._compress_backend(token_stream, safe=True)
+        compressed = self._compress_backend(token_stream)
         return self.MAGIC_DICT + b'\x01' + compressed
 
     def _decompress_static_dict(self, compressed: bytes) -> Optional[bytes]:
         if not compressed.startswith(self.MAGIC_DICT + b'\x01'):
             return None
         payload = compressed[len(self.MAGIC_DICT) + 1:]
-        token_stream = self._decompress_backend(payload, safe=True)
+        token_stream = self._decompress_backend(payload)
         if token_stream is None:
             return None
         return self._detokenize_static_dict(token_stream)
@@ -2404,14 +2362,14 @@ class PJPCompressor:
             token_stream = self.transform_25(data)
         except:
             return None
-        compressed = self._compress_backend(token_stream, safe=True)
+        compressed = self._compress_backend(token_stream)
         return self.MAGIC_DICT + b'\x02' + compressed
 
     def _decompress_dynamic_dict(self, compressed: bytes) -> Optional[bytes]:
         if not compressed.startswith(self.MAGIC_DICT + b'\x02'):
             return None
         payload = compressed[len(self.MAGIC_DICT) + 1:]
-        token_stream = self._decompress_backend(payload, safe=True)
+        token_stream = self._decompress_backend(payload)
         if token_stream is None:
             return None
         return self.reverse_transform_25(token_stream)
@@ -2493,14 +2451,14 @@ class PJPCompressor:
         token_stream = self._tokenize_with_line_dict(data)
         if token_stream is None:
             return None
-        compressed = self._compress_backend(token_stream, safe=True)
+        compressed = self._compress_backend(token_stream)
         return self.MAGIC_LINE + compressed
 
     def _decompress_line_dict(self, compressed: bytes) -> Optional[bytes]:
         if not compressed.startswith(self.MAGIC_LINE):
             return None
         payload = compressed[len(self.MAGIC_LINE):]
-        token_stream = self._decompress_backend(payload, safe=True)
+        token_stream = self._decompress_backend(payload)
         if token_stream is None:
             return None
         return self._detokenize_line_dict(token_stream)
@@ -2603,7 +2561,7 @@ class PJPCompressor:
     # New: Block‑wise compression for Option 9
     # ------------------------------------------------------------------
     def compress_blocks(self, data: bytes, block_size: int = BLOCK_SIZE,
-                        time_limit: float = 60.0) -> bytes:
+                        time_limit: float = 300.0) -> bytes:
         """
         Split data into blocks of `block_size` bytes. For each block, try
         Absolute, Zaden, and Algorithm 36, pick the smallest, and store with
@@ -2616,11 +2574,12 @@ class PJPCompressor:
         out.extend(struct.pack('<H', block_size))
         out.extend(struct.pack('<H', len(blocks)))
         for idx, block in enumerate(blocks):
-            # Try Absolute
-            abs_bytes = self._compress_hybrid_bytes(block)[1]
+            # Try Absolute – use hybrid
+            abs_bytes = self._compress_hybrid_bytes(block)[0]
+
             # Try Zaden (block optimization) – use a small time limit per block
             zaden_trans, zaden_keys = self._block_optimize(block, block_size, False, time_limit)
-            zaden_compressed = self.compress_with_best(zaden_trans, safe=False, ultra=True,
+            zaden_compressed = self.compress_with_best(zaden_trans, ultra=True,
                                                        include_28=True, include_29=True, include_30=True)
             # Build Zaden full format (magic 0x33 + header + keys + inner)
             zaden_full = bytes([self.ZADEN_MAGIC])
@@ -2640,7 +2599,7 @@ class PJPCompressor:
                 method = 2
             out.append(method)
             out.extend(struct.pack('<H', len(best)))
-            out.extend(best)
+            out.extend(best)   # now best is always bytes
             # Progress
             if (idx+1) % 10 == 0 or idx == len(blocks)-1:
                 print(f"Block {idx+1}/{len(blocks)} compressed to {len(best)} bytes")
@@ -2704,7 +2663,7 @@ class PJPCompressor:
             values.append(int.from_bytes(padded[i:i+3], 'little'))
         n = len(values)
         if n == 0:
-            return bytes([self.ALGO36_MAGIC, pad_len, 0]) + self._compress_backend(b'', safe=False)
+            return bytes([self.ALGO36_MAGIC, pad_len, 0]) + self._compress_backend(b'')
 
         candidates = set()
         for i in range(24):
@@ -2739,7 +2698,7 @@ class PJPCompressor:
             new_v = (v - best_pass) & 0xFFFFFF
             transformed.extend(new_v.to_bytes(3, 'little'))
 
-        compressed = self.compress_with_best(bytes(transformed), safe=False, ultra=True,
+        compressed = self.compress_with_best(bytes(transformed), ultra=True,
                                              include_28=True, include_29=True, include_30=True)
         out = bytearray([self.ALGO36_MAGIC, pad_len, best_idx])
         out.extend(compressed)
@@ -2789,7 +2748,7 @@ class PJPCompressor:
         c_dynamic = self._compress_dynamic_dict(data)
         if c_dynamic is not None:
             candidates.append(('Dynamic-Dict', c_dynamic))
-        c_pjp = self.compress_with_best(data, safe=False, ultra=True,
+        c_pjp = self.compress_with_best(data, ultra=True,
                                         include_28=True, include_29=True, include_30=True)
         candidates.append(('PJP-Absolute', c_pjp))
         best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
@@ -2840,7 +2799,7 @@ class PJPCompressor:
             best_bytes, method = self._compress_hybrid_bytes(data)
         else:
             candidates = []
-            c_pjp = self.compress_with_best(data, safe=False, ultra=ultra,
+            c_pjp = self.compress_with_best(data, ultra=ultra,
                                             include_28=include_28, include_29=include_29,
                                             include_30=include_30)
             candidates.append(('PJP', c_pjp))
@@ -3110,26 +3069,23 @@ class PJPCompressor:
         print("\nTesting random 1000‑byte block through full compress/decompress...")
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
 
-        for mode_name, safe in [("marker‑free", False), ("safe", True)]:
-            compressed = self.compress_with_best(test_data, safe=safe, ultra=True,
-                                                 include_28=True, include_29=True,
-                                                 include_30=True)
-            decompressed, _ = self._decompress_auto(compressed)
-            if decompressed != test_data:
-                print(f"  FAIL: random data pipeline mismatch in {mode_name} mode")
-                return False
-
-        print("  PASS: random data pipeline OK in both modes")
+        compressed = self.compress_with_best(test_data, ultra=True,
+                                             include_28=True, include_29=True,
+                                             include_30=True)
+        decompressed, _ = self._decompress_auto(compressed)
+        if decompressed != test_data:
+            print("  FAIL: random data pipeline mismatch")
+            return False
+        print("  PASS: random data pipeline OK")
 
         # 4. Empty input
         print("\nTesting empty input...")
-        for safe in [False, True]:
-            compressed_empty = self.compress_with_best(b'', safe, include_28=True, include_29=True,
-                                                       include_30=True)
-            decomp_empty, _ = self._decompress_auto(compressed_empty)
-            if decomp_empty != b'':
-                print(f"  FAIL: empty input pipeline mismatch (safe={safe})")
-                return False
+        compressed_empty = self.compress_with_best(b'', include_28=True, include_29=True,
+                                                   include_30=True)
+        decomp_empty, _ = self._decompress_auto(compressed_empty)
+        if decomp_empty != b'':
+            print("  FAIL: empty input pipeline mismatch")
+            return False
         print("  PASS: empty input pipeline OK")
 
         # 5. Dictionary round‑trip tests
@@ -3320,7 +3276,7 @@ class PJPCompressor:
             block_size = 128
             time_limit = 1.0
             transformed_data, keys = self._block_optimize(data, block_size, False, time_limit)
-            inner_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
+            inner_compressed = self.compress_with_best(transformed_data, ultra=True,
                                                        include_28=True, include_29=True, include_30=True)
             magic = bytes([self.ZADEN_MAGIC])
             num_blocks = len(keys)
