@@ -273,6 +273,13 @@ class PJPCompressor:
         # Build the list of bijective transforms (1‑256) for triple search
         self.safe_triple_transforms = self._build_safe_triple_list()
 
+        # Attributes for quantum control
+        self.include_quantum_in_triple = False
+        self.quantum_fast_perms = []
+        self.quantum_ultra_perms = []
+        self.quantum_fast_transforms = []
+        self.quantum_ultra_transforms = []
+
         # Precompute quantum permutations if enabled
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
@@ -281,11 +288,52 @@ class PJPCompressor:
     # Build list of transforms usable in triple sequences (bijective only)
     # ------------------------------------------------------------------
     def _build_safe_triple_list(self) -> List[int]:
+        self._rebuild_safe_triple_list()
+        return self.safe_triple_transforms
+
+    def _rebuild_safe_triple_list(self):
         safe = []
         for t in range(1, 257):
             if t not in SAFE_TRIPLES_EXCLUDE:
                 safe.append(t)
-        return safe
+        if self.include_quantum_in_triple:
+            # Add quantum transforms 257-282
+            safe.extend(range(257, 283))
+        self.safe_triple_transforms = safe
+
+    # ------------------------------------------------------------------
+    # verify_transforms: check bijective transforms for losslessness
+    # ------------------------------------------------------------------
+    def verify_transforms(self):
+        """Quick verify that all bijective transforms are lossless."""
+        test_data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        # List of bijective transforms (exclude non‑bijective ones)
+        bijective = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,28,29,30,31,32,256]
+        # Add quantum transforms if enabled
+        if USE_QUANTUM and HAS_QISKIT:
+            bijective.extend(range(257, 283))   # 257‑282
+        all_ok = True
+        for t in bijective:
+            if t not in self.fwd_transforms or t not in self.rev_transforms:
+                print(f"Transform {t} missing from maps.")
+                all_ok = False
+                continue
+            try:
+                fwd = self.fwd_transforms[t]
+                rev = self.rev_transforms[t]
+                encoded = fwd(test_data)
+                decoded = rev(encoded)
+                if decoded != test_data:
+                    print(f"Transform {t} is not lossless!")
+                    all_ok = False
+            except Exception as e:
+                print(f"Transform {t} error: {e}")
+                all_ok = False
+        if all_ok:
+            print("All bijective transforms verified lossless.")
+        else:
+            print("Some transforms failed verification.")
+        return all_ok
 
     # ------------------------------------------------------------------
     # Quantum transform generation (using Qiskit circuit as seed, no simulation)
@@ -316,34 +364,52 @@ class PJPCompressor:
         perm = list(range(n))
         rng2.shuffle(perm)
         if num_qubits == 12:
-            perm_2704 = list(range(2704))
-            rng2 = random.Random(final_seed)
-            rng2.shuffle(perm_2704)
-            return perm_2704
-        else:
-            return perm
+            # For ultra we also create a permutation of size 2704 (but we keep block size = 2^num_qubits)
+            # The method _make_permutation_transform will use block_size = 1 << num_qubits
+            pass
+        return perm
 
     def _precompute_quantum_transforms(self):
+        # Default: fast=8 qubits (block size 256), ultra=12 qubits (block size 4096)
+        self.set_quantum_qubits(fast_qubits=8, ultra_qubits=12)
+
+    def set_quantum_qubits(self, fast_qubits=8, ultra_qubits=12):
+        """Regenerate quantum transforms with given qubit counts."""
+        if not (USE_QUANTUM and HAS_QISKIT):
+            print("Quantum transforms not enabled – ignoring set_quantum_qubits.")
+            return
+        print(f"Regenerating quantum transforms with fast={fast_qubits}, ultra={ultra_qubits} qubits...")
+        # Remove old quantum transforms from maps (257-282)
+        for idx in range(257, 283):
+            self.fwd_transforms.pop(idx, None)
+            self.rev_transforms.pop(idx, None)
+
+        # Rebuild fast and ultra
+        fast_block = 1 << fast_qubits
+        ultra_block = 1 << ultra_qubits
+        if ultra_block > 65536:
+            print(f"WARNING: ultra_block_size = {ultra_block} is very large – may cause memory issues.")
+        # Generate fast perms
         self.quantum_fast_perms = []
         for i in range(9):
             seed = 1000 + i
-            perm = self._generate_permutation_from_circuit(8, seed)
+            perm = self._generate_permutation_from_circuit(fast_qubits, seed)
             self.quantum_fast_perms.append(perm)
-
+        # Generate ultra perms
         self.quantum_ultra_perms = []
         for i in range(17):
             seed = 2000 + i
-            perm = self._generate_permutation_from_circuit(12, seed)
+            perm = self._generate_permutation_from_circuit(ultra_qubits, seed)
             self.quantum_ultra_perms.append(perm)
 
         self.quantum_fast_transforms = []
         for perm in self.quantum_fast_perms:
-            fwd, rev = self._make_substitution_transform(perm, 256)
+            fwd, rev = self._make_substitution_transform(perm, fast_block)
             self.quantum_fast_transforms.append((fwd, rev))
 
         self.quantum_ultra_transforms = []
         for perm in self.quantum_ultra_perms:
-            fwd, rev = self._make_permutation_transform(perm, 2704)
+            fwd, rev = self._make_permutation_transform(perm, ultra_block)
             self.quantum_ultra_transforms.append((fwd, rev))
 
         for idx, (fwd, rev) in enumerate(self.quantum_fast_transforms, start=257):
@@ -352,6 +418,11 @@ class PJPCompressor:
         for idx, (fwd, rev) in enumerate(self.quantum_ultra_transforms, start=266):
             self.fwd_transforms[idx] = fwd
             self.rev_transforms[idx] = rev
+
+        # Update triple list if quantum is included
+        if self.include_quantum_in_triple:
+            self._rebuild_safe_triple_list()
+        print("Quantum transforms updated.")
 
     def _make_substitution_transform(self, perm: List[int], size: int):
         inv_perm = [0] * size
@@ -2282,6 +2353,12 @@ class PJPCompressor:
             print(f"Error reading file: {e}")
             return
 
+        # ---- Enable quantum transforms with 25 qubits for ultra ----
+        if USE_QUANTUM and HAS_QISKIT:
+            self.include_quantum_in_triple = True
+            self.set_quantum_qubits(fast_qubits=8, ultra_qubits=25)   # 25 qubits -> block size 33 million
+            self._rebuild_safe_triple_list()
+
         if not data:
             print("Empty input, writing trivial empty file.")
             with open(outfile, 'wb') as f:
@@ -2634,6 +2711,17 @@ class PJPCompressor:
     def transform_256(self, d: bytes) -> bytes:
         return d
     reverse_transform_256 = transform_256
+
+    # ------------------------------------------------------------------
+    # Stubs for missing self‑test methods (so menu options 5 and 7 don't crash)
+    # ------------------------------------------------------------------
+    def full_self_test(self):
+        print("Full self‑test not implemented. Use other options to test compression.")
+        # Minimal placeholder
+
+    def test_2704_pairs_lossless(self):
+        print("2704‑pair lossless test not implemented. Use other options to test.")
+        # Minimal placeholder
 
 # ------------------------------------------------------------
 # Main menu
