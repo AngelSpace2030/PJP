@@ -262,6 +262,14 @@ class PJPCompressor:
         self.fibonacci = self._gen_fib(100)
         self.PI_STR = "3.14159265358979323846264338327950288419716939937510"
 
+        # --- FIX: Move quantum attributes before building triple list ---
+        self.include_quantum_in_triple = False
+        self.quantum_fast_perms = []
+        self.quantum_ultra_perms = []
+        self.quantum_fast_transforms = []
+        self.quantum_ultra_transforms = []
+        # ----------------------------------------------------------------
+
         self._build_transform_maps()
         self.sequences = self._build_pair_sequences()
         self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}
@@ -272,13 +280,6 @@ class PJPCompressor:
 
         # Build the list of bijective transforms (1‑256) for triple search
         self.safe_triple_transforms = self._build_safe_triple_list()
-
-        # Attributes for quantum control
-        self.include_quantum_in_triple = False
-        self.quantum_fast_perms = []
-        self.quantum_ultra_perms = []
-        self.quantum_fast_transforms = []
-        self.quantum_ultra_transforms = []
 
         # Precompute quantum permutations if enabled
         if USE_QUANTUM and HAS_QISKIT:
