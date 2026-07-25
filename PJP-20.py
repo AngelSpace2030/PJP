@@ -513,7 +513,9 @@ class UltimateHybridCompressor:
         return bytes([(reps-1)%256])+bytes(t)
     def reverse_transform_14(self,d):
         if len(d)<2: return b''
-        reps=(d[0]+1)%256; if reps==0: reps=256
+        reps = (d[0] + 1) % 256
+        if reps == 0:
+            reps = 256
         t=bytearray(d[1:]); cur=len(t)%256; vals=[]
         for _ in range(reps):
             cur=find_nearest_prime_around(cur); vals.append(cur)
@@ -1321,8 +1323,8 @@ class UltimateHybridCompressor:
             nonlocal best_total,best_bytes
             backend=self._compress_backend(transformed, safe=False)
             candidate=header+backend
-            decomp,_=self._decompress_auto(candidate)
-            if decomp==data and len(candidate)<best_total:
+            decomp,_ = self._decompress_auto(candidate)
+            if decomp == data and len(candidate)<best_total:
                 best_total=len(candidate); best_bytes=candidate
         try_candidate(self._encode_marker_raw(),data)
         for t in range(1,257):
@@ -1339,11 +1341,11 @@ class UltimateHybridCompressor:
 
     def _decompress_auto(self,data):
         offset,seq=self._decode_header(data)
-        if offset==0: return b'',None
+        if offset==0: return None,None
         payload=data[offset:]
-        if not payload: return b'',None
+        if not payload: return None,None
         res=self._decompress_backend(payload, safe=False)
-        if res is None: return b'',None
+        if res is None: return None,None
         if not seq: return res,None
         return self._reverse_sequence(res,seq),seq
 
@@ -1715,8 +1717,9 @@ class UltimateHybridCompressor:
                 return
         # Fallback: standard backend decompression via header
         original, _ = self._decompress_auto(data)
-        if original == b'' and seq is None:
-            print("Decompression failed – unknown format."); return
+        if original is None:
+            print("Decompression failed – unknown format.")
+            return
         with open(outfile, 'wb') as f: f.write(original)
         seq_str = "raw" if not seq else f"sequence {seq}"
         print(f"Decompressed ({seq_str}) -> {outfile} ({len(original)} bytes)")
