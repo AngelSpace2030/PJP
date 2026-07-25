@@ -14,6 +14,8 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 """
 
 import math, random, decimal, hashlib, struct, re, os, sys, subprocess, importlib, time, base64
+import heapq
+from datetime import datetime
 from typing import Optional, List, Tuple, Dict, Callable, Any
 from collections import Counter, defaultdict
 
@@ -180,8 +182,8 @@ class UltimateHybridCompressor:
         self.static_dict, self.word_to_index = [], {}
         self.line_dict, self.line_to_index = [], {}
 
-        self._build_transform_maps()                # base transforms 1..52
-        self.sequences = self._build_pair_sequences()  # 52x52 = 2704 pairs
+        self._build_transform_maps()                # base transforms 1..256
+        self.sequences = self._build_pair_sequences()  # 52x52 = 2704 pairs (compression only uses 1..52)
         self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}
         self.pair_to_index = {seq: idx for idx, seq in enumerate(self.sequences)}
 
@@ -1196,11 +1198,15 @@ class UltimateHybridCompressor:
 
     reverse_transform_47 = transform_47
 
-    # ---------- Transform 52: identity (as a safe max) ----------
+    # ---------- Transform 52 identity ----------
     def transform_52(self, d): return d
     reverse_transform_52 = transform_52
 
-    # ---------- Build base transform maps (1..52) ----------
+    # ---------- Transform 256 identity ----------
+    def transform_256(self, d): return d
+    reverse_transform_256 = transform_256
+
+    # ---------- Build base transform maps (1..256) ----------
     def _build_transform_maps(self):
         self.fwd = {}
         self.rev = {}
@@ -1222,7 +1228,7 @@ class UltimateHybridCompressor:
         for i in range(41, 48):
             self.fwd[i] = getattr(self, f"transform_{i}")
             self.rev[i] = getattr(self, f"reverse_transform_{i}")
-        # 48-51 dynamic
+        # 48-52 dynamic/identity
         for i in range(48, 52):
             f, r = self._dynamic_transform(i)
             self.fwd[i] = f
@@ -1230,6 +1236,12 @@ class UltimateHybridCompressor:
         # 52 identity
         self.fwd[52] = self.transform_52
         self.rev[52] = self.reverse_transform_52
+
+        # 53-256 dynamic (Backwards compatibility for older files that use these IDs)
+        for i in range(53, 257):
+            f, r = self._dynamic_transform(i)
+            self.fwd[i] = f
+            self.rev[i] = r
 
     # ---------- Pair sequences – all ordered pairs except (52, 52) ----------
     def _build_pair_sequences(self):
@@ -1789,8 +1801,8 @@ class UltimateHybridCompressor:
             pad2 = (3 - len(inter) % 3) % 3
             padded2 = inter + b'\x00' * pad2
             trans2 = bytearray()
-            for j in range(0, len(padded2), 3):
-                v = int.from_bytes(padded2[j:j + 3], 'little')
+            for i in range(0, len(padded2), 3):
+                v = int.from_bytes(padded2[i:i + 3], 'little')
                 new = (v - k2) & 0xFFFFFF
                 trans2.extend(new.to_bytes(3, 'little'))
             final = bytes(trans2[:len(inter)])
