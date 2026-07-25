@@ -112,7 +112,6 @@ ALPHABET_6BIT = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 
 CHAR_TO_6BIT = {ch: i for i, ch in enumerate(ALPHABET_6BIT)}
 SIXBIT_TO_CHAR = {i: ch for ch, i in CHAR_TO_6BIT.items()}
 
-# Full PAQ state table (256 rows) - reused directly
 PAQ_STATE_TABLE = [
     [1, 2, 0, 0], [3, 5, 0, 1], [4, 6, 2, 0], [7, 10, 0, 2],
     [8, 12, 3, 0], [9, 13, 1, 1], [11, 14, 0, 3], [15, 19, 4, 0],
@@ -148,7 +147,6 @@ PAQ_STATE_TABLE = [
     [249, 250, 12, 4], [251, 252, 10, 5], [253, 254, 8, 6], [255, 255, 6, 7],
 ]
 
-# Prefix‑free nibble code (transform 23)
 _CONST_DIAPASON_ITER_CODE = [
     (2, 0b10), (2, 0b11), (3, 0b010), (3, 0b011), (4, 0b0010), (4, 0b0011),
     (5, 0b00010), (5, 0b00011), (6, 0b000010), (6, 0b000011), (7, 0b0000010),
@@ -168,7 +166,6 @@ def find_nearest_prime_around(n):
         o += 1
 
 
-# ========== Main Compressor Class ==========
 class UltimateHybridCompressor:
     def __init__(self, repeat_count=100):
         self.repeat_count = repeat_count
@@ -179,18 +176,14 @@ class UltimateHybridCompressor:
         self.mask_46 = self._build_mask_46()
         self.mod_state_table = [[(v - 400) & 0xFF for v in row] for row in PAQ_STATE_TABLE]
 
-        self.static_dict, self.word_to_index = [], {}
-        self.line_dict, self.line_to_index = [], {}
-
-        self._build_transform_maps()                # base transforms 1..256
-        self.sequences = self._build_pair_sequences()  # 52x52 = 2704 pairs (compression only uses 1..52)
+        self._build_transform_maps()
+        self.sequences = self._build_pair_sequences()
         self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}
         self.pair_to_index = {seq: idx for idx, seq in enumerate(self.sequences)}
 
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_byte_substitutions()
 
-    # ---------- Quantum byte substitutions (8‑qubit) ----------
     def _gen_quantum_permutation(self, seed):
         from qiskit import QuantumCircuit
         qc = QuantumCircuit(8)
@@ -223,7 +216,6 @@ class UltimateHybridCompressor:
             self.fwd[idx] = lambda data, perm=perm: bytes(perm[b] for b in data)
             self.rev[idx] = lambda data, inv=inv_perm: bytes(inv[b] for b in data)
 
-    # ---------- Helpers ----------
     def _gen_seed_tables(self, n, size, seed):
         random.seed(seed)
         return [[random.randint(5, 255) for _ in range(size)] for _ in range(n)]
@@ -245,7 +237,6 @@ class UltimateHybridCompressor:
         base = [1, 2, 4, 8, 16, 32, 64, 128, 3, 6]
         return [(b - 10) & 0xFF for b in base] * 10
 
-    # ---------- Bit helpers ----------
     def _append_bits(self, bits, val, cnt):
         for i in range(cnt - 1, -1, -1): bits.append((val >> i) & 1)
 
@@ -256,7 +247,6 @@ class UltimateHybridCompressor:
             val = (val << 1) | bits[pos + i]
         return val
 
-    # ---------- Transform 1: RLE ----------
     def transform_01(self, data):
         if not data: return b'\x00'
         best_result = None
@@ -394,7 +384,6 @@ class UltimateHybridCompressor:
             if bits[i] != 0: return None
         return out
 
-    # ---------- Transforms 2-24 ----------
     def transform_02(self, d):
         t = bytearray(d)
         r = self.repeat_count
@@ -671,7 +660,6 @@ class UltimateHybridCompressor:
     def transform_22(self, d): return d
     reverse_transform_22 = transform_22
 
-    # Transform 23 – Constant Diapason
     def _compress_bits(self, bits):
         if not bits: return b'\x00\x00\x00'
         cur = bits[:]
@@ -752,7 +740,6 @@ class UltimateHybridCompressor:
             out.append(val)
         return bytes(out)
 
-    # Transform 24 – constant‑byte run compression (43‑byte blocks)
     def transform_24(self, d):
         if not d: return b''
         MAX_LEN = 43
@@ -812,7 +799,6 @@ class UltimateHybridCompressor:
                     out.append(b)
         return bytes(out)
 
-    # ---------- Transforms 25-30: Fermat / Powers ----------
     def transform_25(self, d):
         if not d: return b'\x01'
         n = 3
@@ -1063,7 +1049,6 @@ class UltimateHybridCompressor:
         n = int.from_bytes(nb, 'big')
         return n, encoded
 
-    # ---------- Transforms 31-40: dynamic XOR ----------
     def _dynamic_transform(self, n):
         def tf(d):
             if not d: return b''
@@ -1074,7 +1059,6 @@ class UltimateHybridCompressor:
 
         return tf, tf
 
-    # ---------- Transforms 41-47: special ----------
     def transform_41(self, d):
         if not d: return b''
         mask = bytes([0x27, 0x03])
@@ -1198,52 +1182,41 @@ class UltimateHybridCompressor:
 
     reverse_transform_47 = transform_47
 
-    # ---------- Transform 52 identity ----------
     def transform_52(self, d): return d
     reverse_transform_52 = transform_52
 
-    # ---------- Transform 256 identity ----------
     def transform_256(self, d): return d
     reverse_transform_256 = transform_256
 
-    # ---------- Build base transform maps (1..256) ----------
     def _build_transform_maps(self):
         self.fwd = {}
         self.rev = {}
-        # 1-24
         for i in range(1, 25):
             if hasattr(self, f"transform_{i:02d}"):
                 self.fwd[i] = getattr(self, f"transform_{i:02d}")
                 self.rev[i] = getattr(self, f"reverse_transform_{i:02d}")
-        # 25-30 Fermat
         for i in range(25, 31):
             self.fwd[i] = getattr(self, f"transform_{i}")
             self.rev[i] = getattr(self, f"reverse_transform_{i}")
-        # 31-40 dynamic
         for i in range(31, 41):
             f, r = self._dynamic_transform(i)
             self.fwd[i] = f
             self.rev[i] = r
-        # 41-47 special
         for i in range(41, 48):
             self.fwd[i] = getattr(self, f"transform_{i}")
             self.rev[i] = getattr(self, f"reverse_transform_{i}")
-        # 48-52 dynamic/identity
         for i in range(48, 52):
             f, r = self._dynamic_transform(i)
             self.fwd[i] = f
             self.rev[i] = r
-        # 52 identity
         self.fwd[52] = self.transform_52
         self.rev[52] = self.reverse_transform_52
 
-        # 53-256 dynamic (Backwards compatibility for older files that use these IDs)
         for i in range(53, 257):
             f, r = self._dynamic_transform(i)
             self.fwd[i] = f
             self.rev[i] = r
 
-    # ---------- Pair sequences – all ordered pairs except (52, 52) ----------
     def _build_pair_sequences(self):
         pairs = []
         for t1 in range(1, 53):
@@ -1269,7 +1242,6 @@ class UltimateHybridCompressor:
         for t in reversed(seq): res = self.rev[t](res)
         return res
 
-    # ---------- PI / constant helpers ----------
     def get_pi_digits(self, n):
         if n < 1: return ""
         return self.PI_STR[2:2 + n]
@@ -1319,7 +1291,6 @@ class UltimateHybridCompressor:
         reps = ((L * 13 + s * 17) % 256) + 1
         return max(1, min(256, reps))
 
-    # ---------- Huffman helpers ----------
     @staticmethod
     def _huffman_code_lengths(freq):
         heap = [(f, i, i) for i, f in enumerate(freq) if f > 0]
@@ -1368,7 +1339,6 @@ class UltimateHybridCompressor:
             code += 1
         return codes
 
-    # ---------- LZ77+Huffman (2 KB window) ----------
     WINDOW_SIZE = 2048
     MIN_MATCH = 3
     MAX_MATCH = 2048
@@ -1551,7 +1521,6 @@ class UltimateHybridCompressor:
                 tokens.append(('M', dist, length))
         return self._lz77_untokenize(tokens)
 
-    # ---------- LZH pipeline (0xFF marker) ----------
     def _compress_lzh_pipeline(self, data, ultra=True):
         best_total = float('inf')
         best_bytes = None
@@ -1592,7 +1561,6 @@ class UltimateHybridCompressor:
         if not seq: return transformed
         return self._reverse_sequence(transformed, seq)
 
-    # ---------- Variable‑length header encoding / decoding ----------
     def _encode_marker_single(self, t):
         if t <= 252: return bytes([t - 1])
         return bytes([254, t - 253])
@@ -1627,7 +1595,6 @@ class UltimateHybridCompressor:
         for t in reversed(seq): res = self.rev[t](res)
         return res
 
-    # ---------- Compression backends ----------
     def _compress_backend(self, data, safe=False):
         candidates = []
         if HAS_ZSTD:
@@ -1646,7 +1613,7 @@ class UltimateHybridCompressor:
             return bytes([marker[0]]) + best
         else:
             _, best = min(candidates, key=lambda x: len(x[1]))
-            return best  # no marker
+            return best
 
     def _decompress_backend(self, data, safe=False):
         if not data: return None
@@ -1665,7 +1632,6 @@ class UltimateHybridCompressor:
                 except:
                     pass
             return None
-        # marker‑free try
         if HAS_ZSTD:
             try:
                 return zstd_dctx.decompress(data)
@@ -1676,9 +1642,8 @@ class UltimateHybridCompressor:
                 return paq_mod.decompress(data)
             except:
                 pass
-        return data  # raw fallback
+        return data
 
-    # ---------- Main compression (backend) ----------
     def compress_with_best(self, data, ultra=True):
         if not data:
             backend = self._compress_backend(b'', safe=False)
@@ -1723,7 +1688,6 @@ class UltimateHybridCompressor:
         if not seq: return res, None
         return self._reverse_sequence(res, seq), seq
 
-    # ---------- Zaden block optimization (0x33) ----------
     ZADEN_MAGIC = 0x33
 
     def _find_best_16bit_key(self, block, time_limit=60):
@@ -1856,7 +1820,6 @@ class UltimateHybridCompressor:
             out_parts.append(bytes(orig_block[:len(block)]))
         return b''.join(out_parts)
 
-    # ---------- Algorithm 36 (0x36) ----------
     ALGO36_MAGIC = 0x36
 
     def algo36_compress(self, data, time_limit=300):
@@ -1909,7 +1872,6 @@ class UltimateHybridCompressor:
         if pad: out = out[:-pad]
         return bytes(out)
 
-    # ---------- Unified decompression (auto‑detects format) ----------
     def decompress_file(self, infile: str, outfile: str):
         try:
             with open(infile, 'rb') as f: data = f.read()
@@ -1917,7 +1879,6 @@ class UltimateHybridCompressor:
             print(f"Error reading file: {e}")
             return
 
-        # Try each magic detection
         if len(data) > 0 and data[0] == self.ALGO36_MAGIC:
             original = self.algo36_decompress(data)
             if original is not None:
@@ -1930,7 +1891,6 @@ class UltimateHybridCompressor:
                 with open(outfile, 'wb') as f: f.write(original)
                 print(f"Decompressed (Zaden) -> {outfile} ({len(original)} bytes)")
                 return
-        # LZH marker 0xFF after header
         offset, seq = self._decode_header(data)
         if offset > 0 and len(data) > offset and data[offset] == 0xFF:
             original = self._decompress_lzh_pipeline(data)
@@ -1938,7 +1898,6 @@ class UltimateHybridCompressor:
                 with open(outfile, 'wb') as f: f.write(original)
                 print(f"Decompressed (LZ77+Huffman) -> {outfile} ({len(original)} bytes)")
                 return
-        # Fallback: standard backend decompression via header
         original, _ = self._decompress_auto(data)
         if original is None:
             print("Decompression failed – unknown format.")
@@ -1947,7 +1906,6 @@ class UltimateHybridCompressor:
         seq_str = "raw" if not seq else f"sequence {seq}"
         print(f"Decompressed ({seq_str}) -> {outfile} ({len(original)} bytes)")
 
-    # ---------- Full self‑test (all 2704 indices, LZH, Zaden, Algo36) ----------
     def full_self_test(self):
         print("=" * 60)
         print("UltimateHybridCompressor – FULL SELF‑TEST (2704 indices)")
@@ -2013,7 +1971,6 @@ class UltimateHybridCompressor:
         return True
 
 
-# ---------- Menu ----------
 def main():
     print("Ultimate Hybrid Compressor – 2704 transformation paths (52x52)")
     c = UltimateHybridCompressor(repeat_count=100)
