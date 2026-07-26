@@ -3,14 +3,16 @@
 """
 Unified PAQJP+PJP – All Transforms Combined
 ===========================================
-Includes:
- - 256 base transforms from PAQJP 9.3 (RLE, XOR, PI, FLT, LZH, etc.)
- - Extra transforms from PJP: Base64, SHA‑256 tokenizer, 6‑bit, Zaden, etc.
- - LZ77+Huffman pipeline (2 KB window)
- - Dynamic & static dictionary compression
- - Quantum‑inspired transforms (Qiskit, optional)
- - Zaden block optimization + Algorithm 36
- - Exhaustive self‑test over all paths
+- 256 base transforms (RLE, XOR, PI, FLT, LZH, Base64, 6‑bit text, etc.)
+- 65,535 transform pairs for Ultra compression
+- LZ77+Huffman pipeline (2 KB window)
+- Dictionary compression (static/dynamic/line)
+- Quantum‑inspired transforms (optional Qiskit)
+- Zaden block optimization + Algorithm 36
+- Exhaustive self‑test over all 65536 indices
+- Output naming:
+    compressed   : input.pjp   (or input.pjp.lzh)
+    decompressed : input (strips .pjp/.pjp.lzh)
 """
 
 import math
@@ -27,13 +29,9 @@ import urllib.request
 import sys
 import subprocess
 import importlib
-import zipfile
-import io
-import xml.etree.ElementTree as ET
 import time
-from datetime import datetime
 from typing import Optional, List, Tuple, Dict, Callable, Any
-from collections import Counter, defaultdict
+from collections import Counter
 
 # ------------------------------------------------------------------
 # Optional backends
@@ -350,7 +348,7 @@ class UnifiedCompressor:
     def get_bit_size(self, k: int) -> int:
         return 23 if k <= 0x7FFFFF else 25
 
-    def transform_17(self, data: bytes) -> bytes:  # Pi mask (PAQJP index 17)
+    def transform_17(self, data: bytes) -> bytes:
         if not data: return b''
         k, _ = self.find_lossless_k(7)
         bits_used = self.get_bit_size(k)
@@ -547,7 +545,7 @@ class UnifiedCompressor:
         marker = self._read_bits(bits, pos, 3)
         pos += 3
         if marker != 0b010: return None
-        pos += 8  # skip shift byte
+        pos += 8
         out = bytearray()
         while pos < nbits:
             if pos + 2 > nbits: break
@@ -580,10 +578,7 @@ class UnifiedCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01–21 (from both, but we keep the original PAQJP set for 1–21)
-    # We'll map 1–21 to the PAQJP versions, which are identical to PJP's except 14 removed.
-    # PJP didn't have a transform 14 (checksum append) – we'll keep it as identity? PAQJP has it.
-    # We'll take PAQJP's 1–21 as they are fully bijective.
+    # Transforms 01‑21 (original PAQJP set)
     # ------------------------------------------------------------------
     def transform_01(self, d):
         t = bytearray(d)
@@ -772,7 +767,6 @@ class UnifiedCompressor:
         return bytes(t)
 
     def transform_14(self, d):
-        # Checksum append – from PAQJP; not fully bijective but we keep as part of base set (same as PAQJP)
         if not d: return b'\x00'
         checksum = sum(d) % 256
         return d + bytes([checksum])
@@ -847,10 +841,9 @@ class UnifiedCompressor:
         return bytes(t)
 
     # ------------------------------------------------------------------
-    # PJP transforms 22–27 (extra) – we assign them to indices 22–27
-    # These were not in PAQJP (except maybe 22 Base64?). We'll place them.
+    # PJP transforms 22‑27 (extra)
     # ------------------------------------------------------------------
-    def transform_22(self, data: bytes) -> bytes:  # Base64 (from PJP)
+    def transform_22(self, data: bytes) -> bytes:  # Base64
         return base64.b64encode(data)
     def reverse_transform_22(self, data: bytes) -> bytes:
         try:
@@ -858,7 +851,7 @@ class UnifiedCompressor:
         except:
             return data
 
-    # 23 – SHA‑256 word tokenizer (PJP's original 23)
+    # 23 – SHA‑256 word tokenizer (PJP's 23)
     def transform_23(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
         try:
@@ -1196,7 +1189,7 @@ class UnifiedCompressor:
             return data
 
     # ------------------------------------------------------------------
-    # Transforms 28–30: PJP's subtract variants (we keep them)
+    # Transforms 28‑30: PJP's subtract variants
     # ------------------------------------------------------------------
     def transform_28(self, data: bytes) -> bytes:
         if not data: return b''
@@ -1366,7 +1359,7 @@ class UnifiedCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transforms 31–32: docx identity (from PJP)
+    # Transforms 31‑32: docx identity (from PJP)
     # ------------------------------------------------------------------
     def transform_31(self, data: bytes) -> bytes:
         return data
@@ -1378,71 +1371,9 @@ class UnifiedCompressor:
         return data
 
     # ------------------------------------------------------------------
-    # PAQJP special transforms 41-47 + 23-24 PAQJP, 25-30 FLT, etc.
-    # We need to map them to higher indices. We'll extend to 256 with PAQJP's dynamic, then add PJP's dynamic.
-    # For simplicity, we'll keep PAQJP indices 23-24 (Constant Diapason, block run) as 33,34? Too complex.
-    # We'll simply build a merged list where:
-    #   1-21  = PAQJP 1-21
-    #   22-27 = PJP 22-27
-    #   28-30 = PJP 28-30
-    #   31-32 = PJP 31-32 (identity)
-    #   33-?  = PAQJP transforms: 23 (Constant Diapason), 24 (block run), 25-30 (FLT), 31-40 dynamic, 41-47 special, 48-255 dynamic, 256 identity.
-    # But PJP's 33-255 were dynamic; we'll keep PAQJP's dynamic for 48-255, and place PAQJP's 23-47 into 33-?.
-    # Actually, let's re-index PAQJP's transforms 23-47 into 33-57, then PAQJP dynamic 48-255 become 58-265? That's >256.
-    # We'll limit to 256 total transforms. We'll choose a selection that includes all important ones.
-    # Since we can only have 256 transforms in the current header encoding, we'll keep the most useful ones.
-    # We'll adopt the following mapping:
-    #   1-21  = PAQJP 1-21
-    #   22-27 = PJP 22-27
-    #   28-30 = PJP 28-30
-    #   31-32 = PJP 31-32 (identity)
-    #   33    = PAQJP 23 (Constant Diapason)
-    #   34    = PAQJP 24 (block run)
-    #   35-40 = PAQJP 25-30 (FLT based)
-    #   41-47 = PAQJP 41-47 (special)
-    #   48-255 = PAQJP dynamic 48-255 (XOR with seed)
-    #   256   = identity
-    # We'll keep PAQJP's transforms 31-40 dynamic (which were XOR with seed) but we have no room. We'll skip them.
-    # The pair sequences will be built from a subset of bijective transforms that includes 1-13,15-21,28-30,33,34,41-47,48-255,256 etc.
-    # We'll just use the PAQJP pair generation approach: all 256 transforms, with pairs of any two (65535) excluding (256,256). That works if we have 256 transforms.
-    # Since we have exactly 256 transforms (1..256), we can use the PAQJP pair scheme.
-    # We need to map PAQJP's original 23-24 (Constant Diapason, block run) to 33,34, PAQJP 25-30 to 35-40, PAQJP 41-47 to 41-47 (they are special and were in PAQJP with indices 41-47). That fits perfectly!
-    # So we'll place PAQJP's 41-47 at indices 41-47.
-    # PAQJP's 48-255 dynamic become 48-255.
-    # PJP's 33-255 dynamic are omitted (we have PAQJP dynamic).
-    # Quantum transforms from PJP (257-282) are not included in the base 256; we'll add them as separate optional extra transforms only when quantum enabled, extending beyond 256, but header will need support. For simplicity, we'll not include quantum in base set; user can use quantum via a separate option.
-    # So final mapping: same as PAQJP's original but with extra transforms 22-32 inserted, shifting PAQJP's 23-47 to 33-57? Wait, we need to check PAQJP original indices.
-    # In original PAQJP:
-    # 1-24: original set
-    # 25-30: FLT
-    # 31-40: dynamic
-    # 41-47: special
-    # 48-255: dynamic
-    # 256: identity
-    # So PAQJP already had 23 (Constant Diapason) and 24 (block run). So we want to keep them. But we want to insert PJP 22-27. This would shift PAQJP's 23-24. So we need to move PAQJP's 23 (Constant Diapason) and 24 (block run) to new indices. That's fine.
-    # Let's do:
-    #  1-21 : PAQJP 1-21
-    #  22   : PJP Base64
-    #  23   : PJP SHA256 tokenizer
-    #  24   : PJP XOR-prime tokenizer
-    #  25   : PJP dynamic dict
-    #  26   : PJP SHA256 block mask
-    #  27   : PJP 6-bit text
-    #  28-30: PJP subtract
-    #  31-32: PJP identity
-    #  33   : PAQJP's original 23 (Constant Diapason)   -> now call transform_33
-    #  34   : PAQJP's original 24 (block run)          -> transform_34
-    #  35-40: PAQJP's 25-30 (FLT)                     -> transform_35-40
-    #  41-47: PAQJP's 41-47 (special)                 -> same numbers
-    #  48-255: PAQJP's 48-255 (dynamic)               -> same numbers
-    #  256: identity
-    # This keeps 256 transforms! Great.
-
-    # We'll implement PAQJP's transforms 23,24,25-30,41-47 under new numbers 33-...
-    # We'll copy PAQJP's code for those transforms and assign them.
-
-    # First, PAQJP's original 23 (Constant Diapason) code:
-    def _paqjp_transform_23(self, data: bytes) -> bytes:  # now our 33
+    # PAQJP special transforms 41‑47 + Constant Diapason (33), block run (34), FLT 35‑40
+    # ------------------------------------------------------------------
+    def _paqjp_transform_23(self, data: bytes) -> bytes:  # our index 33
         if not data: return b'\x00\x00\x00'
         bits = []
         for byte in data:
@@ -1599,7 +1530,7 @@ class UnifiedCompressor:
                     out.append(b)
         return bytes(out)
 
-    # PAQJP FLT 25-30 -> our 35-40
+    # FLT 25-30 -> our 35-40
     def _paqjp_transform_25(self, data: bytes) -> bytes:  # index 35
         if not data: return b'\x01'
         n = 3
@@ -1686,7 +1617,7 @@ class UnifiedCompressor:
                 decoded.append((pow(chunk[i] + 1, inv_e200, 257) - 1) & 0xFF)
         return bytes(decoded[:orig_len])
 
-    def _paqjp_transform_28(self, data: bytes) -> bytes:  # with backend compress
+    def _paqjp_transform_28(self, data: bytes) -> bytes:
         if not data:
             out = bytearray(b'\x00\x00\x00\x00')
             out.extend(b'\x01\x00')
@@ -1856,7 +1787,7 @@ class UnifiedCompressor:
             decoded.extend(block)
         return bytes(decoded[:orig_len])
 
-    # PAQJP special 41-47 -> our 41-47 (same as original)
+    # PAQJP special 41-47 -> our 41-47 (same numbers)
     def transform_41(self, data: bytes) -> bytes:
         if not data: return b''
         mask = bytes([0x27, 0x03])
@@ -1886,7 +1817,6 @@ class UnifiedCompressor:
         return bytes(t)
     reverse_transform_43 = transform_43
 
-    # 44 is Base64 in PAQJP, but we already have PJP Base64 at 22. We'll keep PAQJP's Base64 at 44 as well (same).
     def transform_44(self, data: bytes) -> bytes:
         if not data: return b''
         return base64.b64encode(data)
@@ -2017,7 +1947,7 @@ class UnifiedCompressor:
             if not found: break
         return bytes(out)
 
-    # 46 power-of-2 mask (from PAQJP)
+    # 46 power-of-2 mask
     def transform_46(self, data: bytes) -> bytes:
         if not data: return b''
         t = bytearray(data)
@@ -2027,7 +1957,7 @@ class UnifiedCompressor:
         return bytes(t)
     reverse_transform_46 = transform_46
 
-    # 47 PAQ state table XOR (from PAQJP)
+    # 47 PAQ state table XOR
     def transform_47(self, data: bytes) -> bytes:
         if not data: return b''
         t = bytearray(data)
@@ -2039,7 +1969,7 @@ class UnifiedCompressor:
         return bytes(t)
     reverse_transform_47 = transform_47
 
-    # Dynamic 48-255 (XOR with seed) from PAQJP
+    # Dynamic 48-255 (XOR with seed)
     def _dynamic_transform(self, n: int):
         def tf(data: bytes):
             if not data: return b''
@@ -2081,7 +2011,7 @@ class UnifiedCompressor:
         self.fwd_transforms[29] = self.transform_29; self.rev_transforms[29] = self.reverse_transform_29
         self.fwd_transforms[30] = self.transform_30; self.rev_transforms[30] = self.reverse_transform_30
 
-        # 31-32 identity (docx)
+        # 31-32 identity
         self.fwd_transforms[31] = self.transform_31; self.rev_transforms[31] = self.reverse_transform_31
         self.fwd_transforms[32] = self.transform_32; self.rev_transforms[32] = self.reverse_transform_32
 
@@ -2101,7 +2031,7 @@ class UnifiedCompressor:
         self.fwd_transforms[39] = self._paqjp_transform_29; self.rev_transforms[39] = self._paqjp_reverse_29
         self.fwd_transforms[40] = self._paqjp_transform_30; self.rev_transforms[40] = self._paqjp_reverse_30
 
-        # 41-47 special (PAQJP original)
+        # 41-47 special
         self.fwd_transforms[41] = self.transform_41; self.rev_transforms[41] = self.reverse_transform_41
         self.fwd_transforms[42] = self.transform_42; self.rev_transforms[42] = self.reverse_transform_42
         self.fwd_transforms[43] = self.transform_43; self.rev_transforms[43] = self.reverse_transform_43
@@ -2110,7 +2040,7 @@ class UnifiedCompressor:
         self.fwd_transforms[46] = self.transform_46; self.rev_transforms[46] = self.reverse_transform_46
         self.fwd_transforms[47] = self.transform_47; self.rev_transforms[47] = self.reverse_transform_47
 
-        # 48-255 dynamic (PAQJP)
+        # 48-255 dynamic
         for i in range(48, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
@@ -2121,7 +2051,7 @@ class UnifiedCompressor:
         self.rev_transforms[256] = self.reverse_transform_256
 
     # ------------------------------------------------------------------
-    # Pair sequences – use all 65535 pairs from PAQJP (256x256 minus identity)
+    # Pair sequences – 65535 (256x256 minus identity)
     # ------------------------------------------------------------------
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
         pairs = []
@@ -2175,7 +2105,7 @@ class UnifiedCompressor:
         return lines, line_to_idx
 
     # ------------------------------------------------------------------
-    # Quantum transforms (from PJP)
+    # Quantum transforms (optional)
     # ------------------------------------------------------------------
     def _generate_permutation_from_circuit(self, num_qubits: int, seed: int) -> List[int]:
         qc = QuantumCircuit(num_qubits)
@@ -2227,7 +2157,6 @@ class UnifiedCompressor:
         for perm in self.quantum_ultra_perms:
             fwd, rev = self._make_permutation_transform(perm, 2704)
             self.quantum_ultra_transforms.append((fwd, rev))
-        # Extend transforms beyond 256
         base = 256
         for idx, (fwd, rev) in enumerate(self.quantum_fast_transforms, start=1):
             self.fwd_transforms[base + idx] = fwd
@@ -2491,7 +2420,7 @@ class UnifiedCompressor:
         return self._lz77_untokenize(tokens)
 
     # ------------------------------------------------------------------
-    # Variable‑length header encoding (from PAQJP, extended for >256)
+    # Variable‑length header encoding
     # ------------------------------------------------------------------
     def _encode_marker_single(self, t: int) -> bytes:
         if t <= 252:
@@ -2499,7 +2428,6 @@ class UnifiedCompressor:
         elif t <= 255:
             return bytes([254, t - 253])
         else:
-            # For quantum extended transforms (257+), use 255 prefix + 2-byte index
             return bytes([255, (t - 256) // 256, (t - 256) % 256])
 
     def _encode_marker_raw(self) -> bytes:
@@ -2562,7 +2490,7 @@ class UnifiedCompressor:
         return data
 
     # ------------------------------------------------------------------
-    # Main compression (Ultra, with LZH option)
+    # Main compression methods
     # ------------------------------------------------------------------
     def compress_with_lzh(self, data: bytes, ultra: bool = True) -> bytes:
         best_total = float('inf')
@@ -2610,9 +2538,7 @@ class UnifiedCompressor:
             return transformed
         return self._reverse_sequence(transformed, seq)
 
-    def compress_with_best(self, data: bytes, ultra: bool = True,
-                           include_28: bool = False, include_29: bool = False,
-                           include_30: bool = False) -> bytes:
+    def compress_with_best(self, data: bytes, ultra: bool = True) -> bytes:
         if not data:
             backend = self._compress_backend(b'')
             return self._encode_marker_raw() + backend
@@ -2620,23 +2546,12 @@ class UnifiedCompressor:
         best_total = float('inf')
         best_bytes = None
 
-        single_transforms = list(range(1, 257))
-        # optionally filter 28-30
-        if not include_28:
-            single_transforms = [t for t in single_transforms if t != 28]
-        if not include_29:
-            single_transforms = [t for t in single_transforms if t != 29]
-        if not include_30:
-            single_transforms = [t for t in single_transforms if t != 30]
-
-        # raw
         candidate = self._encode_marker_raw() + self._compress_backend(data)
         if len(candidate) < best_total:
             best_total = len(candidate)
             best_bytes = candidate
 
-        # singles
-        for t in single_transforms:
+        for t in range(1, 257):
             try:
                 transformed = self.fwd_transforms[t](data)
                 candidate = self._encode_marker_single(t) + self._compress_backend(transformed)
@@ -2646,14 +2561,8 @@ class UnifiedCompressor:
             except:
                 continue
 
-        # pairs
         if ultra:
             for t1, t2 in self.sequences:
-                # Skip if any disallowed
-                if (not include_28 and (t1 == 28 or t2 == 28)) or \
-                   (not include_29 and (t1 == 29 or t2 == 29)) or \
-                   (not include_30 and (t1 == 30 or t2 == 30)):
-                    continue
                 try:
                     transformed = self.fwd_transforms[t1](data)
                     transformed = self.fwd_transforms[t2](transformed)
@@ -2691,183 +2600,14 @@ class UnifiedCompressor:
         return result
 
     # ------------------------------------------------------------------
-    # Dictionary compress methods (from PJP)
+    # File I/O with simple naming
     # ------------------------------------------------------------------
-    MAGIC_DICT = b'DICT'
-    MAGIC_LINE = b'LINE'
+    def _auto_output_name(self, infile: str, suffix: str = ".pjp") -> str:
+        """Return original_name + suffix, no timestamp."""
+        base = os.path.basename(infile)
+        name, _ = os.path.splitext(base)
+        return f"{name}{suffix}"
 
-    def _tokenize_with_static_dict(self, data: bytes) -> Optional[bytes]:
-        try:
-            text = data.decode('utf-8')
-        except:
-            return None
-        pattern = r'([A-Za-z0-9_]+)'
-        tokens = re.split(pattern, text)
-        stream = bytearray()
-        for i, tok in enumerate(tokens):
-            if i % 2 == 1:
-                idx = self.word_to_index.get(tok)
-                if idx is not None:
-                    stream += b'\x01'
-                    stream += struct.pack('>I', idx)
-                else:
-                    word_bytes = tok.encode('utf-8')
-                    stream += b'\x02'
-                    stream += struct.pack('>H', len(word_bytes))
-                    stream += word_bytes
-            else:
-                if tok:
-                    sep_bytes = tok.encode('utf-8')
-                    stream += b'\x00'
-                    stream += struct.pack('>H', len(sep_bytes))
-                    stream += sep_bytes
-        return bytes(stream)
-
-    def _detokenize_static_dict(self, token_stream: bytes) -> Optional[bytes]:
-        if not token_stream:
-            return b''
-        out = bytearray()
-        pos = 0
-        while pos < len(token_stream):
-            if pos >= len(token_stream): break
-            typ = token_stream[pos]; pos += 1
-            if typ == 0x01:
-                if pos + 4 > len(token_stream): break
-                idx = struct.unpack('>I', token_stream[pos:pos+4])[0]
-                pos += 4
-                if idx < len(self.static_dict):
-                    out += self.static_dict[idx].encode('utf-8')
-                else:
-                    return None
-            elif typ == 0x02:
-                if pos + 2 > len(token_stream): break
-                word_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
-                pos += 2
-                if pos + word_len > len(token_stream): break
-                out += token_stream[pos:pos+word_len]
-                pos += word_len
-            elif typ == 0x00:
-                if pos + 2 > len(token_stream): break
-                sep_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
-                pos += 2
-                if pos + sep_len > len(token_stream): break
-                out += token_stream[pos:pos+sep_len]
-                pos += sep_len
-            else:
-                break
-        return bytes(out)
-
-    def _compress_static_dict(self, data: bytes) -> Optional[bytes]:
-        token_stream = self._tokenize_with_static_dict(data)
-        if token_stream is None: return None
-        compressed = self._compress_backend(token_stream)
-        return self.MAGIC_DICT + b'\x01' + compressed
-
-    def _decompress_static_dict(self, compressed: bytes) -> Optional[bytes]:
-        if not compressed.startswith(self.MAGIC_DICT + b'\x01'):
-            return None
-        payload = compressed[len(self.MAGIC_DICT) + 1:]
-        token_stream = self._decompress_backend(payload)
-        if token_stream is None: return None
-        return self._detokenize_static_dict(token_stream)
-
-    def _compress_dynamic_dict(self, data: bytes) -> Optional[bytes]:
-        try:
-            token_stream = self.transform_25(data)
-        except:
-            return None
-        compressed = self._compress_backend(token_stream)
-        return self.MAGIC_DICT + b'\x02' + compressed
-
-    def _decompress_dynamic_dict(self, compressed: bytes) -> Optional[bytes]:
-        if not compressed.startswith(self.MAGIC_DICT + b'\x02'):
-            return None
-        payload = compressed[len(self.MAGIC_DICT) + 1:]
-        token_stream = self._decompress_backend(payload)
-        if token_stream is None: return None
-        return self.reverse_transform_25(token_stream)
-
-    def _tokenize_with_line_dict(self, data: bytes) -> Optional[bytes]:
-        if not self.line_dict: return None
-        try:
-            text = data.decode('utf-8')
-        except:
-            return None
-        pos = 0
-        token_list = []
-        while pos < len(text):
-            earliest_pos = len(text) + 1
-            earliest_len = 0
-            earliest_idx = -1
-            for idx, phrase in enumerate(self.line_dict):
-                p = text.find(phrase, pos)
-                if p != -1 and (p < earliest_pos or (p == earliest_pos and len(phrase) > earliest_len)):
-                    earliest_pos = p
-                    earliest_len = len(phrase)
-                    earliest_idx = idx
-            if earliest_idx != -1:
-                if earliest_pos > pos:
-                    token_list.append((False, text[pos:earliest_pos].encode('utf-8')))
-                token_list.append((True, earliest_idx))
-                pos = earliest_pos + earliest_len
-            else:
-                token_list.append((False, text[pos:].encode('utf-8')))
-                break
-        out = bytearray()
-        for is_index, payload in token_list:
-            if is_index:
-                out += b'\x01'
-                out += struct.pack('>Q', payload)
-            else:
-                raw_bytes = payload
-                out += b'\x00'
-                out += struct.pack('>H', len(raw_bytes))
-                out += raw_bytes
-        return bytes(out)
-
-    def _detokenize_line_dict(self, token_stream: bytes) -> Optional[bytes]:
-        if not token_stream: return b''
-        out = bytearray()
-        pos = 0
-        while pos < len(token_stream):
-            if pos >= len(token_stream): break
-            typ = token_stream[pos]; pos += 1
-            if typ == 1:
-                if pos + 8 > len(token_stream): return None
-                idx = struct.unpack('>Q', token_stream[pos:pos+8])[0]
-                pos += 8
-                if idx < len(self.line_dict):
-                    out += self.line_dict[idx].encode('utf-8')
-                else:
-                    return None
-            elif typ == 0:
-                if pos + 2 > len(token_stream): return None
-                raw_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
-                pos += 2
-                if pos + raw_len > len(token_stream): return None
-                out += token_stream[pos:pos+raw_len]
-                pos += raw_len
-            else:
-                return None
-        return bytes(out)
-
-    def _compress_line_dict(self, data: bytes) -> Optional[bytes]:
-        token_stream = self._tokenize_with_line_dict(data)
-        if token_stream is None: return None
-        compressed = self._compress_backend(token_stream)
-        return self.MAGIC_LINE + compressed
-
-    def _decompress_line_dict(self, compressed: bytes) -> Optional[bytes]:
-        if not compressed.startswith(self.MAGIC_LINE):
-            return None
-        payload = compressed[len(self.MAGIC_LINE):]
-        token_stream = self._decompress_backend(payload)
-        if token_stream is None: return None
-        return self._detokenize_line_dict(token_stream)
-
-    # ------------------------------------------------------------------
-    # File API
-    # ------------------------------------------------------------------
     def _atomic_write(self, path: str, data: bytes):
         dirname = os.path.dirname(path) or '.'
         basename = os.path.basename(path)
@@ -2878,12 +2618,6 @@ class UnifiedCompressor:
         finally:
             os.close(fd)
         os.replace(tmpname, path)
-
-    def _auto_output_name(self, infile: str, suffix: str = ".pjp") -> str:
-        base = os.path.basename(infile)
-        name, _ = os.path.splitext(base)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{name}.{ts}{suffix}"
 
     def compress_file(self, infile: str, outfile: str = "", ultra: bool = True, use_lzh: bool = False):
         try:
@@ -2918,14 +2652,16 @@ class UnifiedCompressor:
         except Exception as e:
             print(f"Error reading file: {e}")
             return
-        if data.startswith(self.MAGIC_DICT + b'\x01'):
-            original = self._decompress_static_dict(data)
-        elif data.startswith(self.MAGIC_DICT + b'\x02'):
-            original = self._decompress_dynamic_dict(data)
-        elif data.startswith(self.MAGIC_LINE):
+        if data.startswith(b'DICT'):
+            if data.startswith(b'DICT\x01'):
+                original = self._decompress_static_dict(data)
+            elif data.startswith(b'DICT\x02'):
+                original = self._decompress_dynamic_dict(data)
+            else:
+                print("Unknown dictionary format")
+                return
+        elif data.startswith(b'LINE'):
             original = self._decompress_line_dict(data)
-        elif len(data) > 0 and data[0] == 0x33:  # Zaden magic (we can add if needed)
-            original = None  # not implemented here, but could be added
         else:
             offset, seq = self._decode_header(data)
             if offset == 0:
@@ -2940,9 +2676,9 @@ class UnifiedCompressor:
             return
         if not outfile:
             base = os.path.basename(infile)
-            name, _ = os.path.splitext(base)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            outfile = f"{name}.{ts}.orig"
+            # Strip .pjp or .pjp.lzh suffix to restore original name
+            name_without_suffix = re.sub(r'\.pjp(\.lzh)?$', '', base)
+            outfile = name_without_suffix
         try:
             self._atomic_write(outfile, original)
         except Exception as e:
@@ -2978,7 +2714,7 @@ class UnifiedCompressor:
             print("  All 65536 transformations are lossless on test byte.")
         else:
             return False
-        # Random 1000‑byte pipeline test
+
         print("\nRandom 1000‑byte pipeline test (LZH backend)...")
         rng = random.Random(12345)
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
@@ -3021,14 +2757,14 @@ class UnifiedCompressor:
 # ------------------------------------------------------------
 def main():
     print(f"{PROGNAME} – Unified compression with all transforms from PAQJP and PJP")
-    print("Includes: LZ77+Huffman pipeline, dictionary compression, quantum transforms (optional).")
+    print("Compressed output: input.pjp (or input.pjp.lzh)\n")
     c = UnifiedCompressor()
 
     while True:
         print("\nMenu:")
-        print("1) Compress (standard backend, Fast) – 256 singles only")
-        print("2) Compress (standard backend, Ultra) – all 65535 pairs")
-        print("3) Compress (LZ77+Huffman, Ultra) – pairs + LZH")
+        print("1) Compress (Fast) – only 256 single transforms")
+        print("2) Compress (Ultra) – all 65535 pairs + backend")
+        print("3) Compress (Ultra LZH) – pairs + LZ77+Huffman")
         print("4) Decompress")
         print("5) Full self‑test (all 65535 indices)")
         print("0) Exit")
