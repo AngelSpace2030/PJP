@@ -1140,7 +1140,7 @@ class UnifiedCompressor:
     def reverse_transform_26(self, data: bytes) -> bytes:
         return self.transform_26(data)
 
-    # 27 – 6‑bit text compression (PJP's 27)
+    # 27 – 6‑bit text compression (PJP's 27) -> **BUG FIX APPLIED HERE**
     def transform_27(self, data: bytes) -> bytes:
         try:
             text = data.decode('utf-8')
@@ -1164,28 +1164,44 @@ class UnifiedCompressor:
             out.append(byte)
         length_bytes = struct.pack('<I', len(text))
         return length_bytes + bytes(out)
+
     def reverse_transform_27(self, data: bytes) -> bytes:
-        if len(data) < 4: return data
+        if len(data) < 4:
+            return data
         num_chars = struct.unpack('<I', data[:4])[0]
         packed = data[4:]
+
+        # CRITICAL FIX: Detect pass-through data from transform_23
+        needed_bytes = (num_chars * 6 + 7) // 8
+        if len(packed) != needed_bytes:
+            return data
+
+        # Check that padding bits are zero (if any)
+        pad_bits = (8 - (num_chars * 6) % 8) % 8
+        if pad_bits > 0 and packed:
+            last_byte = packed[-1]
+            mask = (1 << pad_bits) - 1
+            if (last_byte & mask) != 0:
+                return data
+
         bits = []
         for b in packed:
             for i in range(7, -1, -1):
                 bits.append((b >> i) & 1)
         needed_bits = num_chars * 6
-        if len(bits) < needed_bits: return data
+        if len(bits) < needed_bits:
+            return data
         chars = []
-        for i in range(num_chars):
-            val = 0
-            for j in range(6):
-                val = (val << 1) | bits[i*6 + j]
-            if val < 64:
-                chars.append(SIXBIT_TO_CHAR[val])
-            else:
-                return data
         try:
+            for i in range(num_chars):
+                val = 0
+                for j in range(6):
+                    val = (val << 1) | bits[i*6 + j]
+                if val >= 64:
+                    return data
+                chars.append(SIXBIT_TO_CHAR[val])
             return ''.join(chars).encode('utf-8')
-        except UnicodeEncodeError:
+        except (IndexError, UnicodeEncodeError, UnicodeDecodeError):
             return data
 
     # ------------------------------------------------------------------
