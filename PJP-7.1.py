@@ -12,7 +12,7 @@ Unified PAQJP+PJP – All Transforms Combined
 - Exhaustive self‑test over all 65536 indices
 - Output naming:
     compressed   : input.pjp   (or input.pjp.lzh)
-    decompressed : input (strips .pjp/.pjp.lzh)
+    decompressed : input_decompressed (safe default to prevent overwriting)
 """
 
 import math
@@ -2693,9 +2693,9 @@ class UnifiedCompressor:
             return
         if not outfile:
             base = os.path.basename(infile)
-            # Strip .pjp or .pjp.lzh suffix to restore original name
+            # SAFE CHANGE: Append _decompressed to avoid overwriting original files
             name_without_suffix = re.sub(r'\.pjp(\.lzh)?$', '', base)
-            outfile = name_without_suffix
+            outfile = name_without_suffix + "_decompressed"
         try:
             self._atomic_write(outfile, original)
         except Exception as e:
