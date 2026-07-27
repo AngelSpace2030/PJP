@@ -12,7 +12,7 @@ Unified PAQJP+PJP – All Transforms Combined
 - Exhaustive self‑test over all 65536 indices
 - Output naming:
     compressed   : input.pjp   (or input.pjp.lzh)
-    decompressed : input_decompressed (safe default to prevent overwriting)
+    decompressed : custom or input_decompressed (safe default)
 """
 
 import math
@@ -2796,8 +2796,9 @@ def main():
             infile = input("Input file: ").strip()
             c.compress_file(infile, ultra=True, use_lzh=True)
         elif choice == "4":
-            infile = input("Compressed file: ").strip()
-            c.decompress_file(infile)
+            infile = input("Compressed file (.pjp or .pjp.lzh): ").strip()
+            outfile = input("Output file (leave blank for default '_decompressed'): ").strip()
+            c.decompress_file(infile, outfile)
         elif choice == "5":
             c.full_self_test()
         elif choice == "0":
