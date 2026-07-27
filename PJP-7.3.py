@@ -13,7 +13,6 @@ Unified PAQJP+PJP – All Transforms Combined
 - Output naming:
     compressed   : input.txt.pjp   (or input.txt.pjp.lzh)
     decompressed : input.txt (restores original extension)
-- Option 6: Timed transform benchmark (25s) on 65536‑bit alternating pattern
 """
 
 import math
@@ -2769,55 +2768,6 @@ class UnifiedCompressor:
             result = self.rev_transforms[t](result)
         return result
 
-    # ------------------------------------------------------------------
-    # ** NEW OPTION 6: Timed transform benchmark (25 seconds) **
-    # ------------------------------------------------------------------
-    def timed_transform_benchmark(self, duration: float = 25.0) -> None:
-        """
-        Run a timed benchmark over all 65536 transform indices.
-        Test data: 8192 bytes of alternating 0x55 (representing 65536 bits of 1/0 pattern).
-        Compress transformed data using the best available backend (zstd/paq/identity).
-        Print the best compression found within the time limit.
-        """
-        print("=" * 60)
-        print("Timed Transform Benchmark ({} seconds)".format(duration))
-        print("Test data: 8192 bytes of alternating 0x55 (65536 bits of 1/0 pattern)")
-        print("=" * 60)
-        test_data = bytes([0x55]) * 8192  # 65536 bits, alternating ones and zeros
-        original_len = len(test_data)
-        start_time = time.time()
-        best_index = -1
-        best_size = original_len
-        best_seq = ()
-        checked = 0
-        for idx in range(65536):
-            elapsed = time.time() - start_time
-            if elapsed >= duration:
-                print("\nTime limit reached. Stopping benchmark.")
-                break
-            try:
-                transformed = self._apply_sequence_by_index(test_data, idx)
-                compressed = self._compress_backend(transformed)
-                comp_len = len(compressed)
-                checked += 1
-                if comp_len < best_size:
-                    best_size = comp_len
-                    best_index = idx
-                    best_seq = self.get_transform_sequence(idx)
-                    print(f"[{elapsed:.1f}s] New best: index {idx} (seq {best_seq}) size {best_size} bytes (ratio {original_len/best_size:.2f}:1)")
-            except Exception:
-                continue
-            if idx % 1000 == 0:
-                print(f"  ... checked {idx} transforms, elapsed {elapsed:.1f}s")
-        print("\n" + "-" * 40)
-        print(f"Benchmark completed. Checked {checked} indices in {time.time()-start_time:.1f}s.")
-        if best_index >= 0:
-            print(f"Best transform: index {best_index}, sequence {best_seq}")
-            print(f"Original size: {original_len} bytes  →  Compressed: {best_size} bytes")
-            print(f"Compression ratio: {original_len/best_size:.2f}:1")
-        else:
-            print("No valid transform found (all failed or time expired before first result).")
-
 # ------------------------------------------------------------
 # Main menu
 # ------------------------------------------------------------
@@ -2833,7 +2783,7 @@ def main():
         print("3) Compress (Ultra LZH) – pairs + LZ77+Huffman")
         print("4) Decompress")
         print("5) Full self‑test (all 65535 indices)")
-        print("6) Timed transform benchmark (25s) on 65536‑bit pattern")
+        print("6) Compress (Custom output) – specify input and output name (.pjp appended)")
         print("0) Exit")
         choice = input("> ").strip()
         if choice == "1":
@@ -2852,7 +2802,13 @@ def main():
         elif choice == "5":
             c.full_self_test()
         elif choice == "6":
-            c.timed_transform_benchmark(duration=25.0)
+            infile = input("Input file: ").strip()
+            outbase = input("Output base name (will be saved as [name].pjp): ").strip()
+            if not outbase:
+                outbase = "compressed"
+            outfile = outbase + ".pjp"
+            print("Using Ultra compression (all 65535 pairs + backend).")
+            c.compress_file(infile, outfile, ultra=True, use_lzh=False)
         elif choice == "0":
             break
         else:
