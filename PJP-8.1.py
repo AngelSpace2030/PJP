@@ -881,25 +881,31 @@ class QuantumzstandardCompressor:
         try: return base64.b64decode(data)
         except: return data
 
-    # Huffman helpers
+    # Huffman helpers (FIXED against heapq ValueError)
     @staticmethod
     def _huffman_code_lengths(freq):
-        heap = [(f,i,i) for i,f in enumerate(freq) if f>0]
-        if not heap: return [0]*len(freq)
-        if len(heap)==1:
-            lengths = [0]*len(freq)
+        heap = [(f, i, i) for i, f in enumerate(freq) if f > 0]
+        if not heap:
+            return [0] * len(freq)
+        if len(heap) == 1:
+            lengths = [0] * len(freq)
             lengths[heap[0][2]] = 1
             return lengths
         heapq.heapify(heap)
         next_id = len(heap)
-        while len(heap)>1:
-            f1,_,n1 = heapq.heappop(heap); f2,_,n2 = heapq.heappop(heap)
-            heapq.heappush(heap, (f1+f2, next_id, (n1,n2)))
-            next_id+=1
-        lengths = [0]*len(freq)
+        while len(heap) > 1:
+            # Safely pop the two smallest items
+            f1, _, n1 = heapq.heappop(heap)
+            f2, _, n2 = heapq.heappop(heap)
+            heapq.heappush(heap, (f1 + f2, next_id, (n1, n2)))
+            next_id += 1
+        lengths = [0] * len(freq)
         def traverse(node, depth):
-            if isinstance(node, int): lengths[node] = depth
-            else: traverse(node[0],depth+1); traverse(node[1],depth+1)
+            if isinstance(node, int):
+                lengths[node] = depth
+            else:
+                traverse(node[0], depth + 1)
+                traverse(node[1], depth + 1)
         traverse(heap[0][2], 0)
         return lengths
 
@@ -909,9 +915,13 @@ class QuantumzstandardCompressor:
         codes, code, prev_len = {}, 0, 0
         for sym in symbols:
             cl = code_lengths[sym]
-            if cl==0: continue
-            if prev_len==0: prev_len=cl
-            elif cl != prev_len: code <<= (cl-prev_len); prev_len=cl
+            if cl == 0:
+                continue
+            if prev_len == 0:
+                prev_len = cl
+            elif cl != prev_len:
+                code <<= (cl - prev_len)
+                prev_len = cl
             codes[sym] = (code, cl)
             code += 1
         return codes
