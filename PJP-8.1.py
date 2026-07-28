@@ -10,6 +10,7 @@ Combines:
   - Dictionary compression (static/dynamic/line)
   - Quantum‑inspired transforms (optional Qiskit)
   - Exhaustive self‑test of all 65536 indices and LZH
+  - Optional backend installation prompt (5 packages)
 
 Menu:
   1) Compress (Fast)           – 256 single transforms + backend
@@ -23,7 +24,7 @@ Menu:
 Output: input.ext.pjp (or .pjp.lzh for LZH variants)
 """
 
-import math, random, decimal, hashlib, base64, heapq, struct, os, tempfile, re, sys, time
+import math, random, decimal, hashlib, base64, heapq, struct, os, tempfile, re, sys, time, importlib, subprocess
 from typing import Optional, List, Tuple, Dict, Callable, Any
 from collections import Counter
 
@@ -40,6 +41,16 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
+def install_package(pkg: str) -> bool:
+    print(f"Installing {pkg}...")
+    try:
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
+        print(f"Successfully installed {pkg}")
+        return True
+    except Exception as e:
+        print(f"Failed to install {pkg}: {e}")
+        return False
+
 USE_QUANTUM = False
 HAS_QISKIT = False
 quantum_choice = input("Enable quantum transforms (requires Qiskit)? (y/n): ").strip().lower()
@@ -50,9 +61,43 @@ if quantum_choice == 'y':
         USE_QUANTUM = True
         print("Quantum transforms ENABLED.")
     except ImportError:
-        print("Qiskit not found; quantum disabled.")
+        print("Qiskit not found. Installing automatically...")
+        if install_package('qiskit'):
+            try:
+                from qiskit import QuantumCircuit
+                HAS_QISKIT = True
+                USE_QUANTUM = True
+                print("Quantum transforms ENABLED after automatic installation.")
+            except ImportError:
+                print("Qiskit installation succeeded but import failed – quantum transforms disabled.")
+        else:
+            print("Automatic installation failed – quantum transforms disabled.")
 else:
     print("Quantum transforms disabled.")
+
+# Optional other backends
+other_choice = input("Install other optional compression backends (zstandard, paq, mpmath, cython, python-docx)? (y/n): ").strip().lower()
+if other_choice == 'y':
+    for pkg in ['mpmath', 'zstandard', 'cython', 'paq', 'python-docx']:
+        try:
+            importlib.import_module(pkg)
+        except ImportError:
+            install_package(pkg)
+else:
+    print("Skipping other backends.")
+
+# Re-import backends after possible installation
+try:
+    import zstandard as zstd
+    zstd_cctx = zstd.ZstdCompressor(level=22)
+    zstd_dctx = zstd.ZstdDecompressor()
+    HAS_ZSTD = True
+except ImportError:
+    HAS_ZSTD = False
+try:
+    import paq
+except ImportError:
+    paq = None
 
 # ---------- Dictionary download / merge ----------
 DICT_DIR = "Dictionaries"
