@@ -335,7 +335,7 @@ class QuantumzstandardCompressor:
         t = bytearray(d)
         for i in range(len(t)): t[i] = ((t[i]<<s)|(t[i]>>(8-s)))&0xFF
         return bytes(t)
-    reverse_transform_05 = transform_05  # s=3 for both
+    reverse_transform_05 = transform_05
 
     def transform_06(self, d, sd=42):
         random.seed(sd); sub = list(range(256)); random.shuffle(sub)
@@ -1004,7 +1004,7 @@ class QuantumzstandardCompressor:
             for j in range(8): val = (val<<1)|bits[i+j]
             op_bytes.append(val)
         header = (orig_len.to_bytes(5,'big') + bytes([len(small)]) +
-                  struct.pack('>H', len(ops)) + bytes([0,0]))  # zero/one counts placeholder
+                  struct.pack('>H', len(ops)) + bytes([0,0]))
         return header + small + bytes(op_bytes)
     def reverse_transform_50(self, data):
         if len(data)<10: return b''
@@ -1133,7 +1133,6 @@ class QuantumzstandardCompressor:
 
     def transform_54(self, data):
         if len(data)!=65536: return b'\x01'+data
-        # find longest run >=5
         best_start,best_val,best_len = -1,0,0
         i=0
         while i<65536:
@@ -1142,7 +1141,6 @@ class QuantumzstandardCompressor:
             if j-i > best_len: best_start,best_val,best_len = i,val,j-i
             i=j
         if best_len>=5:
-            # rebuild removing first 5 of that run
             new = bytearray([0x00, best_val])
             new.extend(struct.pack('>H', best_start))
             new.extend(data[:best_start])
@@ -1501,7 +1499,7 @@ class QuantumzstandardCompressor:
         for t in reversed(seq): res = self.rev_transforms[t](res)
         return res
 
-    # ---------- File I/O with error handling ----------
+    # ---------- File I/O ----------
     def compress_file(self, infile, outfile, ultra=True):
         try:
             with open(infile, 'rb') as f: data = f.read()
@@ -1518,31 +1516,6 @@ class QuantumzstandardCompressor:
         except Exception as e:
             print(f"ERROR writing output file: {e}"); return
         print(f"Compressed {len(data)} → {len(compressed)} bytes → {outfile}")
-
-    def decompress_file(self, infile, outfile):
-        try:
-            with open(infile, 'rb') as f: data = f.read()
-        except FileNotFoundError:
-            print(f"ERROR: Input file '{infile}' not found."); return
-        except Exception as e:
-            print(f"ERROR reading file: {e}"); return
-        offset, seq = self._decode_header(data)
-        if offset == 0:
-            print("ERROR: Invalid compressed file header."); return
-        if offset < len(data) and data[offset] == 0xFF:
-            original = self._decompress_lzh_pipeline(data)
-        else:
-            payload = data[offset:]
-            original = self._decompress_backend(payload)
-            if original is not None and seq: original = self._reverse_sequence(original, seq)
-        if original is None:
-            print("ERROR: Decompression failed – data may be corrupt."); return
-        try:
-            with open(outfile, 'wb') as f: f.write(original)
-        except Exception as e:
-            print(f"ERROR writing output file: {e}"); return
-        seq_str = "raw" if not seq else f"sequence {seq}"
-        print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
 
     # ---------- Self‑test ----------
     def full_self_test(self):
