@@ -14,7 +14,7 @@ Combines:
 
 Menu:
   1) Compress (Fast)           – 256 single transforms + backend
-  2) Compress (Ultra)          – 65536 pairs + backend
+  2) Compress (Ultra)           – 65536 pairs + backend
   3) Compress (LZH only)       – LZ77 + Huffman (no transforms)
   4) Compress (Best)           – tries Ultra and LZH, picks smallest
   5) Self‑test (all indices)   – 65536 transformations lossless check
@@ -1178,10 +1178,11 @@ class MegaCompressor:
                 qc.h(i)
                 qc.rz(random.random() * 2 * math.pi, i)
             try:
+                from qiskit import qasm2
+                qasm = qasm2.dumps(qc)
+            except ImportError:
                 qasm = qc.qasm()
-                seed = hash(qasm) & 0xFFFFFFFF
-            except:
-                seed = 42
+            seed = hash(qasm) & 0xFFFFFFFF
             rng = random.Random(seed)
             keys = list(range(65536))
             rng.shuffle(keys)
@@ -2210,6 +2211,7 @@ class MegaCompressor:
             fwd, rev = self._make_permutation_transform(perm, 2704)
             self.fwd_transforms[base2+idx] = fwd; self.rev_transforms[base2+idx] = rev
 
+    # ---------- FIXED QISKIT GENERATOR ----------
     def _generate_permutation_from_circuit(self, num_qubits, seed):
         qc = QuantumCircuit(num_qubits)
         rng = random.Random(seed)
@@ -2224,7 +2226,13 @@ class MegaCompressor:
             for i in range(num_qubits):
                 qc.rz(rng.random() * 2 * math.pi, i)
                 qc.rx(rng.random() * 2 * math.pi, i)
-        qasm_str = qc.qasm()
+        # --- FIX: handle Qiskit 1.0+ and older versions ---
+        try:
+            from qiskit import qasm2
+            qasm_str = qasm2.dumps(qc)
+        except ImportError:
+            qasm_str = qc.qasm()
+        # ---------------------------------------------------
         final_seed = seed + hash(qasm_str) % 1000000
         rng2 = random.Random(final_seed)
         n = 1 << num_qubits
